@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-images:
-    runs-on: docker
+    runs-on: plugin-docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v5
 
