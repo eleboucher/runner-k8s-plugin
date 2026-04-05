@@ -62,6 +62,7 @@ func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequ
 		ManagesOwnNetworking:     true,
 		SupportsServiceContainers: true,
 		EnvironmentCaseInsensitive: false,
+		SupportsLocalCopy:          true,
 		RunnerContext: map[string]string{
 			"os":         "Linux",
 			"arch":       "x86_64",
@@ -240,6 +241,19 @@ func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChun
 	}
 
 	return stream.SendAndClose(&pluginv1.CopyInResponse{})
+}
+
+func (s *k8sServer) CopyLocal(ctx context.Context, req *pluginv1.CopyLocalRequest) (*pluginv1.CopyLocalResponse, error) {
+	env, err := s.getEnv(req.GetEnvironmentId())
+	if err != nil {
+		return nil, err
+	}
+
+	if err := env.pod.CopyDir(req.GetDestPath(), req.GetSrcPath(), false)(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "copylocal: %v", err)
+	}
+
+	return &pluginv1.CopyLocalResponse{}, nil
 }
 
 
