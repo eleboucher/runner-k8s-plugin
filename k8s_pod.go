@@ -544,38 +544,51 @@ func (p *K8sPod) waitForPodRunning(ctx context.Context, pod *corev1.Pod) error {
 	watchCtx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
 
-	watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
-		FieldSelector: "metadata.name=" + pod.Name,
-	})
-	if err != nil {
-		return fmt.Errorf("watch pod: %w", err)
-	}
-	defer watcher.Stop()
+	for {
+		watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
+			FieldSelector: "metadata.name=" + pod.Name,
+		})
+		if err != nil {
+			return fmt.Errorf("watch pod: %w", err)
+		}
 
+		result, done := p.consumePodWatch(watcher)
+		watcher.Stop()
+		if done {
+			return result
+		}
+
+		if watchCtx.Err() != nil {
+			return fmt.Errorf("timeout waiting for pod to become ready")
+		}
+		slog.Debug("watch channel closed, retrying", "pod", pod.Name)
+	}
+}
+
+func (p *K8sPod) consumePodWatch(watcher watch.Interface) (error, bool) {
 	for event := range watcher.ResultChan() {
 		switch event.Type {
 		case watch.Modified, watch.Added:
 			if eventPod, ok := event.Object.(*corev1.Pod); ok {
 				switch eventPod.Status.Phase {
 				case corev1.PodRunning:
-					return nil
+					return nil, true
 				case corev1.PodFailed:
-					return fmt.Errorf("pod failed: reason=%s message=%s", eventPod.Status.Reason, eventPod.Status.Message)
+					return fmt.Errorf("pod failed: reason=%s message=%s", eventPod.Status.Reason, eventPod.Status.Message), true
 				case corev1.PodSucceeded:
-					return fmt.Errorf("pod completed unexpectedly")
+					return fmt.Errorf("pod completed unexpectedly"), true
 				}
 			}
 		case watch.Deleted:
-			return fmt.Errorf("pod was deleted while waiting for it to start")
+			return fmt.Errorf("pod was deleted while waiting for it to start"), true
 		case watch.Error:
 			if status, ok := event.Object.(*metav1.Status); ok {
-				return fmt.Errorf("watch error: %s", status.Message)
+				return fmt.Errorf("watch error: %s", status.Message), true
 			}
-			return fmt.Errorf("unknown watch error")
+			return fmt.Errorf("unknown watch error"), true
 		}
 	}
-
-	return fmt.Errorf("watch channel closed (timeout waiting for pod to become ready)")
+	return nil, false
 }
 
 func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {
@@ -587,28 +600,34 @@ func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {
 	watchCtx, cancel := context.WithTimeout(ctx, pollTimeout)
 	defer cancel()
 
-	watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
-		FieldSelector: "metadata.name=" + p.pod.Name,
-	})
-	if err != nil {
-		return fmt.Errorf("watch pod for container readiness: %w", err)
-	}
-	defer watcher.Stop()
+	for {
+		watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
+			FieldSelector: "metadata.name=" + p.pod.Name,
+		})
+		if err != nil {
+			return fmt.Errorf("watch pod for container readiness: %w", err)
+		}
 
-	for event := range watcher.ResultChan() {
-		if event.Type != watch.Modified && event.Type != watch.Added {
-			continue
+		for event := range watcher.ResultChan() {
+			if event.Type != watch.Modified && event.Type != watch.Added {
+				continue
+			}
+			eventPod, ok := event.Object.(*corev1.Pod)
+			if !ok {
+				continue
+			}
+			if podAllContainersReady(eventPod) {
+				watcher.Stop()
+				return nil
+			}
 		}
-		eventPod, ok := event.Object.(*corev1.Pod)
-		if !ok {
-			continue
-		}
-		if podAllContainersReady(eventPod) {
-			return nil
-		}
-	}
+		watcher.Stop()
 
-	return fmt.Errorf("timeout waiting for all containers to become ready")
+		if watchCtx.Err() != nil {
+			return fmt.Errorf("timeout waiting for all containers to become ready")
+		}
+		slog.Debug("watch channel closed, retrying", "pod", p.pod.Name)
+	}
 }
 
 func podAllContainersReady(pod *corev1.Pod) bool {
