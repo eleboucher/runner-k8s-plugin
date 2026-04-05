@@ -3,18 +3,21 @@ package main
 import (
 	"context"
 	"flag"
-	"runtime/debug"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	pluginv1 "code.forgejo.org/forgejo/runner/v12/act/plugin/proto/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -26,7 +29,12 @@ func main() {
 		grpc.ChainUnaryInterceptor(recoveryUnary()),
 		grpc.ChainStreamInterceptor(recoveryStream()),
 	)
-	pluginv1.RegisterBackendPluginServer(srv, newK8sServer())
+
+	k8sSrv := newK8sServer()
+	pluginv1.RegisterBackendPluginServer(srv, k8sSrv)
+
+	healthSrv := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(srv, healthSrv)
 
 	lis, err := listenOn(*listen)
 	if err != nil {
@@ -35,6 +43,7 @@ func main() {
 	}
 	defer lis.Close()
 
+	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	slog.Info("plugin listening", "address", *listen)
 
 	go func() {
@@ -49,6 +58,14 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down")
+	healthSrv.Shutdown()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer shutdownCancel()
+	if err := k8sSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown cleanup failed", "error", err)
+	}
+
 	srv.GracefulStop()
 }
 
