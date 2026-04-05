@@ -49,15 +49,16 @@ type serviceContainerSpec struct {
 type K8sPod struct {
 	container.LinuxContainerEnvironmentExtensions
 
-	client    kubernetes.Interface
-	restCfg   *rest.Config
-	pod       *corev1.Pod
-	namespace string
-	input     container.NewContainerInput
-	config    *K8sPodConfig
-	services  []serviceContainerSpec
-	capAdd    []string
-	capDrop   []string
+	client      kubernetes.Interface
+	restCfg     *rest.Config
+	pod         *corev1.Pod
+	namespace   string
+	input       container.NewContainerInput
+	config      *K8sPodConfig
+	services    []serviceContainerSpec
+	capAdd      []string
+	capDrop     []string
+	extraLabels map[string]string
 
 	mu     sync.Mutex
 	stdout io.Writer
@@ -393,6 +394,10 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 				"app.kubernetes.io/managed-by": "forgejo-runner",
 			},
 		},
+	}
+
+	for k, v := range p.extraLabels {
+		pod.ObjectMeta.Labels[k] = v
 	}
 
 	if p.config.PodSpec != "" {

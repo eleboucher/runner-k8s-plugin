@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -23,14 +24,19 @@ type k8sEnvironment struct {
 type k8sServer struct {
 	pluginv1.UnimplementedBackendPluginServer
 
+	pluginInstanceID string
+
 	mu   sync.Mutex
 	envs map[string]*k8sEnvironment
 }
 
 func newK8sServer() *k8sServer {
-	return &k8sServer{
-		envs: make(map[string]*k8sEnvironment),
+	s := &k8sServer{
+		pluginInstanceID: uuid.New().String(),
+		envs:             make(map[string]*k8sEnvironment),
 	}
+	slog.Info("plugin instance initialized", "instance_id", s.pluginInstanceID)
+	return s
 }
 
 func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
@@ -41,11 +47,6 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 		return nil, status.Errorf(codes.NotFound, "environment %q not found", id)
 	}
 	return env, nil
-}
-
-
-func (s *k8sServer) Ping(_ context.Context, _ *pluginv1.PingRequest) (*pluginv1.PingResponse, error) {
-	return &pluginv1.PingResponse{}, nil
 }
 
 
@@ -130,6 +131,12 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		return nil, status.Errorf(codes.Internal, "create k8s pod: %v", err)
 	}
 
+	envID := uuid.New().String()
+	pod.extraLabels = map[string]string{
+		"forgejo-runner/environment-id":  envID,
+		"forgejo-runner/plugin-instance": s.pluginInstanceID,
+	}
+
 	// Add service containers
 	for _, svc := range req.GetServices() {
 		pod.AddServiceContainerRaw(svc.GetName(), svc.GetImage(), svc.GetEnv(), svc.GetPorts())
@@ -140,7 +147,6 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		return nil, status.Errorf(codes.Internal, "pod create: %v", err)
 	}
 
-	envID := uuid.New().String()
 	s.mu.Lock()
 	s.envs[envID] = &k8sEnvironment{pod: pod, config: k8sCfg}
 	s.mu.Unlock()
@@ -341,6 +347,49 @@ func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*p
 	return &pluginv1.RemoveResponse{}, nil
 }
 
+func (s *k8sServer) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	snapshot := make(map[string]*k8sEnvironment, len(s.envs))
+	for id, env := range s.envs {
+		snapshot[id] = env
+	}
+	clear(s.envs)
+	s.mu.Unlock()
+
+	if len(snapshot) == 0 {
+		return nil
+	}
+
+	slog.Info("cleaning up active environments", "count", len(snapshot))
+
+	type result struct {
+		id  string
+		err error
+	}
+	results := make(chan result, len(snapshot))
+
+	for id, env := range snapshot {
+		go func() {
+			results <- result{id: id, err: env.pod.Remove()(ctx)}
+		}()
+	}
+
+	var errs int
+	for range len(snapshot) {
+		r := <-results
+		if r.err != nil {
+			slog.Warn("failed to remove environment during shutdown", "id", r.id, "error", r.err)
+			errs++
+		} else {
+			slog.Info("removed environment during shutdown", "id", r.id)
+		}
+	}
+
+	if errs > 0 {
+		return fmt.Errorf("failed to remove %d/%d environments", errs, len(snapshot))
+	}
+	return nil
+}
 
 type execStreamWriter struct {
 	mu         *sync.Mutex

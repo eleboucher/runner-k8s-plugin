@@ -54,6 +54,8 @@ func TestK8sPod_CreatePod_DefaultSpec(t *testing.T) {
 
 	assert.Equal(t, "test-ns", pod.Namespace)
 	assert.Equal(t, "forgejo-runner", pod.Labels["app.kubernetes.io/managed-by"])
+	assert.NotContains(t, pod.Labels, "forgejo-runner/environment-id")
+	assert.NotContains(t, pod.Labels, "forgejo-runner/plugin-instance")
 
 	require.NotEmpty(t, pod.Spec.Containers)
 	main := pod.Spec.Containers[0]
@@ -562,6 +564,22 @@ func TestNewK8sPod_NilConfig(t *testing.T) {
 	_, err := NewK8sPod(&container.NewContainerInput{Image: "test"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "K8sPodConfig is required")
+}
+
+func TestK8sPod_CreatePod_ExtraLabels(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sPod(t, fakeClient)
+	p.extraLabels = map[string]string{
+		"forgejo-runner/environment-id":  "test-env-123",
+		"forgejo-runner/plugin-instance": "test-instance-456",
+	}
+
+	pod, err := p.createPod(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, "forgejo-runner", pod.Labels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "test-env-123", pod.Labels["forgejo-runner/environment-id"])
+	assert.Equal(t, "test-instance-456", pod.Labels["forgejo-runner/plugin-instance"])
 }
 
 type testWriter struct{}
