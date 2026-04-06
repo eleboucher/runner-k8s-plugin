@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"code.forgejo.org/forgejo/runner/v12/act/plugin"
 	pluginv1 "code.forgejo.org/forgejo/runner/v12/act/plugin/proto/v1"
+	goplugin "github.com/hashicorp/go-plugin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -22,6 +24,17 @@ import (
 )
 
 func main() {
+	if os.Getenv(plugin.Handshake.MagicCookieKey) != "" {
+		goplugin.Serve(&goplugin.ServeConfig{
+			HandshakeConfig: plugin.Handshake,
+			Plugins: map[string]goplugin.Plugin{
+				plugin.PluginName: &plugin.BackendGRPCPlugin{Impl: newK8sServer()},
+			},
+			GRPCServer: goplugin.DefaultGRPCServer,
+		})
+		return
+	}
+
 	listen := flag.String("listen", "unix:///var/run/forgejo-runner-k8s.sock", "gRPC listen address (unix:///path or :port)")
 	flag.Parse()
 

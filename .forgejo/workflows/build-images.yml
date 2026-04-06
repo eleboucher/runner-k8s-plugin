@@ -38,10 +38,11 @@ jobs:
             git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push
+      - name: Build and push (v1)
         uses: https://data.forgejo.org/docker/build-push-action@v6
         with:
           context: .
@@ -49,3 +50,26 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Compute v2 image metadata
+        id: meta-v2
+        uses: https://data.forgejo.org/docker/metadata-action@v5
+        with:
+          images: |
+            code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin-v2
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin-v2
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push (v2)
+        uses: https://data.forgejo.org/docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.v2
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-v2.outputs.tags }}
+          labels: ${{ steps.meta-v2.outputs.labels }}
