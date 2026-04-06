@@ -1,56 +1,45 @@
 # Forgejo Runner Kubernetes Plugin
 
-A gRPC backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) that executes CI/CD jobs as Kubernetes pods.
+A backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) that executes CI/CD jobs as Kubernetes pods. Each job runs in its own pod with optional service containers as sidecars, a shared volume, and custom PodSpec support.
 
-## Overview
+## Building
 
-This plugin implements the Forgejo Runner backend plugin protocol, allowing the runner to execute workflow jobs natively on Kubernetes without Docker-in-Docker.
+- Install [Go](https://go.dev/doc/install)
+- `go build -o forgejo-runner-k8s .`
 
-Each job gets its own pod with:
-- A main container running the workflow steps
-- Optional service containers as sidecars (accessible via `localhost`)
-- A shared `/shared` volume for file exchange between steps
-- Custom PodSpec support for GPU, resource limits, node selectors, etc.
+## Configuration
 
-## Installation
+The plugin supports two transport modes. In both cases, labels use the plugin scheme name (`k8s` below) and the runner routes jobs to the matching config.
 
-```bash
-go build -o forgejo-runner-k8s .
-```
+### v1: standalone gRPC server
 
-## Usage
-
-### 1. Start the plugin server
+The plugin runs as a sidecar process. The runner connects over a Unix socket or TCP.
 
 ```bash
-# Listen on a Unix socket
 ./forgejo-runner-k8s --listen unix:///var/run/forgejo-runner-k8s.sock
-
-# Listen on a TCP port
-./forgejo-runner-k8s --listen :9090
 ```
-
-### 2. Configure the runner
-
-In the runner's `config.yaml`, add a `plugins` section and define labels that route to the plugin:
 
 ```yaml
 plugins:
   k8s:
     address: "unix:///var/run/forgejo-runner-k8s.sock"
     options:
-      namespace: "ci-jobs"
-      kubeconfig: "/etc/k8s/config"  # optional, uses in-cluster config by default
-      poll_timeout: "10m"            # optional, default 10m
-
-# Register labels using the plugin scheme.
-# Format: <label-name>:<plugin-name>://<optional-arg>
-#
-# The optional arg is passed to the plugin as "label_arg" in backend_options.
-# For the K8s plugin, this is the path to a PodSpec YAML file.
+      namespace: ci-jobs
 ```
 
-Then register labels on the runner connections:
+### v2: go-plugin (binary launch)
+
+The runner launches the plugin binary as a subprocess via [go-plugin](https://github.com/hashicorp/go-plugin). No sidecar or socket needed. The binary auto-detects how it was launched.
+
+```yaml
+pluginsv2:
+  k8s:
+    path: /usr/local/bin/forgejo-runner-k8s
+    options:
+      namespace: ci-jobs
+```
+
+### Labels
 
 ```yaml
 server:
@@ -62,21 +51,22 @@ server:
         - "gpu:k8s://config/podspec-gpu.yaml"
 ```
 
-### 3. Use in workflows
+### Backend options
 
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-k8s
-    steps:
-      - run: echo "Running in a Kubernetes pod!"
-```
+Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `namespace` | `default` | Kubernetes namespace for pods |
+| `kubeconfig` | in-cluster | Path to kubeconfig file |
+| `poll_timeout` | `10m` | Timeout waiting for pod readiness |
+| `podspec` | — | Default PodSpec path (overridden by label arg) |
+
+The runner also injects `label_arg` (per-job label argument, e.g. PodSpec path) and `job_timeout` automatically.
 
 ## PodSpec files
 
-PodSpec files let you customize the pod template per label. The plugin merges your spec with its defaults.
-
-Example `config/podspec-gpu.yaml`:
+PodSpec files customize the pod template per label. A container named `main` is used for step execution. If absent, one is prepended automatically.
 
 ```yaml
 containers:
@@ -85,75 +75,24 @@ containers:
     resources:
       limits:
         nvidia.com/gpu: "1"
-      requests:
-        memory: "4Gi"
-        cpu: "2"
 nodeSelector:
   gpu: "true"
-tolerations:
-  - key: "nvidia.com/gpu"
-    operator: "Exists"
-    effect: "NoSchedule"
 ```
 
-The `main` container name is special - the plugin uses it as the primary container for step execution. If your PodSpec doesn't include a `main` container, one is prepended automatically.
+## Migrating from the in-tree backend
 
-## Backend options
+The in-tree `k8spod` backend continues to work. To switch to this plugin:
 
-Options can be set in the runner's `plugins.<name>.options` config:
+1. Deploy the plugin (sidecar for v1, or copy the binary for v2)
+2. Change labels from `mylabel:k8spod://podspec.yaml` to `mylabel:k8s://podspec.yaml`
+3. Add the plugin section to the runner config
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `namespace` | `default` | Kubernetes namespace for pods |
-| `kubeconfig` | (in-cluster) | Path to kubeconfig file |
-| `poll_timeout` | `10m` | Timeout for waiting on pod status |
-| `podspec` | (none) | Default PodSpec file path (overridden by label arg) |
-
-The runner also injects these dynamically:
-
-| Option | Description |
-|--------|-------------|
-| `label_arg` | The label's argument (e.g., PodSpec path), resolved per-job |
-| `job_timeout` | Maximum job duration, from the runner's context deadline |
-
-## Architecture
-
-```
-Forgejo Instance
-      |
-      | (gRPC: fetch tasks)
-      v
-Forgejo Runner  ----gRPC---->  K8s Plugin Server  ---->  Kubernetes API
-  (client)                      (this binary)              (pods)
-```
-
-The runner communicates with the plugin over gRPC using the `BackendPlugin` service (defined in `act/plugin/proto/v1/plugin.proto` in the runner repo). The plugin manages pod lifecycle: creation, command execution, file transfers, health checks, and cleanup.
-
-Multiple runners can connect to the same plugin server. The plugin handles concurrent jobs via per-environment isolation (each job gets a unique `environment_id`).
-
-## Development
+## Testing
 
 ```bash
-# Build
-go build -o forgejo-runner-k8s .
-
-# Run locally (requires kubeconfig)
-./forgejo-runner-k8s --listen :9090
-
-# Test with a runner
-# In runner config.yaml:
-# plugins:
-#   k8s:
-#     address: "localhost:9090"
-#     options:
-#       namespace: "default"
+go test ./...
 ```
 
-## Backward compatibility
+## License
 
-The in-tree Kubernetes backend in Forgejo Runner continues to work via `k8spod` labels. This plugin is an alternative that can be deployed and managed independently.
-
-To migrate from the in-tree backend:
-1. Deploy this plugin server
-2. Change labels from `mylabel:k8spod://podspec.yaml` to `mylabel:k8s://podspec.yaml`
-3. Add the `plugins.k8s` section to the runner config
+Same as Forgejo Runner — [GPL version 3.0](https://code.forgejo.org/forgejo/runner/src/branch/main/LICENSE) or any later version.
