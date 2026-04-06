@@ -12,6 +12,7 @@ const (
 	k8sActPath           = k8sSharedMount + "/act"
 	k8sToolCache         = k8sSharedMount + "/toolcache"
 	k8sWorkDir           = k8sSharedMount + "/workdir"
+	k8sDefaultPath       = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
 func NewK8sPod(input *container.NewContainerInput, config *K8sPodConfig) (*K8sPod, error) {

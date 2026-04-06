@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,23 +54,23 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 
 func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequest) (*pluginv1.CapabilitiesResponse, error) {
 	return &pluginv1.CapabilitiesResponse{
-		Name:                      "k8spod",
-		RootPath:                  "/shared",
-		ActPath:                   "/shared/act",
-		ToolCachePath:             "/shared/toolcache",
-		PathVariableName:          "PATH",
-		DefaultPathVariable:       "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		PathSeparator:             ":",
-		SupportsDockerActions:     false,
-		ManagesOwnNetworking:     true,
-		SupportsServiceContainers: true,
+		Name:                       "k8spod",
+		RootPath:                   k8sSharedMount,
+		ActPath:                    k8sActPath,
+		ToolCachePath:              k8sToolCache,
+		PathVariableName:           "PATH",
+		DefaultPathVariable:        k8sDefaultPath,
+		PathSeparator:              ":",
+		SupportsDockerActions:      false,
+		ManagesOwnNetworking:      true,
+		SupportsServiceContainers:  true,
 		EnvironmentCaseInsensitive: false,
 		SupportsLocalCopy:          true,
 		RunnerContext: map[string]string{
 			"os":         "Linux",
 			"arch":       "x86_64",
 			"temp":       "/tmp",
-			"tool_cache": "/shared/toolcache",
+			"tool_cache": k8sToolCache,
 		},
 	}, nil
 }
@@ -166,7 +168,28 @@ func (s *k8sServer) Start(ctx context.Context, req *pluginv1.StartRequest) (*plu
 		return nil, status.Errorf(codes.Internal, "pod start: %v", err)
 	}
 
-	return &pluginv1.StartResponse{}, nil
+	imageEnv := s.readContainerEnv(ctx, env)
+
+	return &pluginv1.StartResponse{ImageEnv: imageEnv}, nil
+}
+
+func (s *k8sServer) readContainerEnv(ctx context.Context, env *k8sEnvironment) map[string]string {
+	var buf bytes.Buffer
+	oldOut, oldErr := env.pod.ReplaceLogWriter(&buf, io.Discard)
+	defer env.pod.ReplaceLogWriter(oldOut, oldErr)
+
+	if err := env.pod.Exec([]string{"env", "-0"}, nil, "", "")(ctx); err != nil {
+		slog.Warn("failed to read container env", "error", err)
+		return nil
+	}
+
+	result := make(map[string]string)
+	for _, entry := range strings.Split(buf.String(), "\x00") {
+		if k, v, ok := strings.Cut(entry, "="); ok && k != "" {
+			result[k] = v
+		}
+	}
+	return result
 }
 
 

@@ -4,10 +4,10 @@ go 1.25.0
 
 toolchain go1.25.8
 
-replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260406093644-e7857401fed3
+replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260406170329-a954a9545889
 
 require (
-	code.forgejo.org/forgejo/runner/v12 v12.0.0-20260406093644-e7857401fed3
+	code.forgejo.org/forgejo/runner/v12 v12.0.0-20260406170329-a954a9545889
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/stretchr/testify v1.11.1
