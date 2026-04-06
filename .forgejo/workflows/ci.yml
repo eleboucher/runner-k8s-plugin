@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v5
+
+      - uses: https://data.forgejo.org/actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+  lint:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v5
+
+      - uses: https://data.forgejo.org/actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: golangci-lint
+        run: golangci-lint run ./...

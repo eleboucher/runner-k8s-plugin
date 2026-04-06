@@ -1,0 +1,93 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - bidichk
+    - depguard
+    - dupl
+    - errcheck
+    - gocritic
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usetesting
+    - wastedassign
+    - forbidigo
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: io/ioutil
+              desc: use os or io instead
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+    nakedret:
+      max-func-lines: 0
+    revive:
+      confidence: 0.8
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+          arguments: [[], [], [{ skipPackageNameChecks: true }]]
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: duplicated-imports
+        - name: modifies-value-receiver
+    staticcheck:
+      checks:
+        - all
+        - -ST1003
+        - -ST1005
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - staticcheck
+          - forbidigo
+        path: _test\.go
+    paths:
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
