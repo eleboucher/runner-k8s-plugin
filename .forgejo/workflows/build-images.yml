@@ -16,14 +16,14 @@ jobs:
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
 
       - name: Login to code.forgejo.org
-        uses: https://data.forgejo.org/docker/login-action@v3
+        uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: code.forgejo.org
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.CODEBERG_TOKEN }}
 
       - name: Login to git.erwanleboucher.dev
-        uses: https://data.forgejo.org/docker/login-action@v3
+        uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: git.erwanleboucher.dev
           username: ${{ vars.USERNAME }}
