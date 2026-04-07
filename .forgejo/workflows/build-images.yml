@@ -31,7 +31,7 @@ jobs:
 
       - name: Compute image metadata
         id: meta
-        uses: https://data.forgejo.org/docker/metadata-action@v5
+        uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
             code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin
@@ -53,7 +53,7 @@ jobs:
 
       - name: Compute v2 image metadata
         id: meta-v2
-        uses: https://data.forgejo.org/docker/metadata-action@v5
+        uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
             code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin-v2
