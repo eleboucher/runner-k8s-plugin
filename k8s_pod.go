@@ -7,13 +7,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"log/slog"
 
 	"code.forgejo.org/forgejo/runner/v12/act/common"
 	"code.forgejo.org/forgejo/runner/v12/act/container"
@@ -144,10 +144,12 @@ func (p *K8sPod) Exec(command []string, env map[string]string, user, workdir str
 		}
 		var fullCmd []string
 		if workdir != "" {
-			inner := append(envcmd, command...)
+			inner := append([]string{}, envcmd...)
+			inner = append(inner, command...)
 			fullCmd = append([]string{"sh", "-c", `cd "$0" && exec "$@"`, workdir}, inner...)
 		} else {
-			fullCmd = append(envcmd, command...)
+			fullCmd = append([]string{}, envcmd...)
+			fullCmd = append(fullCmd, command...)
 		}
 
 		p.mu.Lock()
@@ -396,9 +398,7 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 		},
 	}
 
-	for k, v := range p.extraLabels {
-		pod.ObjectMeta.Labels[k] = v
-	}
+	maps.Copy(pod.Labels, p.extraLabels)
 
 	if p.config.PodSpec != "" {
 		data, err := os.ReadFile(p.config.PodSpec)
@@ -552,10 +552,10 @@ func (p *K8sPod) waitForPodRunning(ctx context.Context, pod *corev1.Pod) error {
 			return fmt.Errorf("watch pod: %w", err)
 		}
 
-		result, done := p.consumePodWatch(watcher)
+		done, err := p.consumePodWatch(watcher)
 		watcher.Stop()
 		if done {
-			return result
+			return err
 		}
 
 		if watchCtx.Err() != nil {
@@ -565,30 +565,30 @@ func (p *K8sPod) waitForPodRunning(ctx context.Context, pod *corev1.Pod) error {
 	}
 }
 
-func (p *K8sPod) consumePodWatch(watcher watch.Interface) (error, bool) {
+func (p *K8sPod) consumePodWatch(watcher watch.Interface) (bool, error) {
 	for event := range watcher.ResultChan() {
 		switch event.Type {
 		case watch.Modified, watch.Added:
 			if eventPod, ok := event.Object.(*corev1.Pod); ok {
 				switch eventPod.Status.Phase {
 				case corev1.PodRunning:
-					return nil, true
+					return true, nil
 				case corev1.PodFailed:
-					return fmt.Errorf("pod failed: reason=%s message=%s", eventPod.Status.Reason, eventPod.Status.Message), true
+					return true, fmt.Errorf("pod failed: reason=%s message=%s", eventPod.Status.Reason, eventPod.Status.Message)
 				case corev1.PodSucceeded:
-					return fmt.Errorf("pod completed unexpectedly"), true
+					return true, fmt.Errorf("pod completed unexpectedly")
 				}
 			}
 		case watch.Deleted:
-			return fmt.Errorf("pod was deleted while waiting for it to start"), true
+			return true, fmt.Errorf("pod was deleted while waiting for it to start")
 		case watch.Error:
 			if status, ok := event.Object.(*metav1.Status); ok {
-				return fmt.Errorf("watch error: %s", status.Message), true
+				return true, fmt.Errorf("watch error: %s", status.Message)
 			}
-			return fmt.Errorf("unknown watch error"), true
+			return true, fmt.Errorf("unknown watch error")
 		}
 	}
-	return nil, false
+	return false, nil
 }
 
 func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {

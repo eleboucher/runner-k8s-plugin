@@ -51,7 +51,6 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 	return env, nil
 }
 
-
 func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequest) (*pluginv1.CapabilitiesResponse, error) {
 	return &pluginv1.CapabilitiesResponse{
 		Name:                       "k8spod",
@@ -62,7 +61,7 @@ func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequ
 		DefaultPathVariable:        k8sDefaultPath,
 		PathSeparator:              ":",
 		SupportsDockerActions:      false,
-		ManagesOwnNetworking:      true,
+		ManagesOwnNetworking:       true,
 		SupportsServiceContainers:  true,
 		EnvironmentCaseInsensitive: false,
 		SupportsLocalCopy:          true,
@@ -74,7 +73,6 @@ func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequ
 		},
 	}, nil
 }
-
 
 func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*pluginv1.CreateResponse, error) {
 	opts := req.GetBackendOptions()
@@ -157,7 +155,6 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	return &pluginv1.CreateResponse{EnvironmentId: envID}, nil
 }
 
-
 func (s *k8sServer) Start(ctx context.Context, req *pluginv1.StartRequest) (*pluginv1.StartResponse, error) {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
@@ -192,7 +189,6 @@ func (s *k8sServer) readContainerEnv(ctx context.Context, env *k8sEnvironment) m
 	return result
 }
 
-
 func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingServer[pluginv1.ExecOutput]) error {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
@@ -225,7 +221,6 @@ func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingS
 
 	return nil
 }
-
 
 func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChunk, pluginv1.CopyInResponse]) error {
 	first, err := stream.Recv()
@@ -285,7 +280,6 @@ func (s *k8sServer) CopyLocal(ctx context.Context, req *pluginv1.CopyLocalReques
 	return &pluginv1.CopyLocalResponse{}, nil
 }
 
-
 func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStreamingServer[pluginv1.CopyOutChunk]) error {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
@@ -316,7 +310,6 @@ func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStre
 	return nil
 }
 
-
 func (s *k8sServer) UpdateEnv(ctx context.Context, req *pluginv1.UpdateEnvRequest) (*pluginv1.UpdateEnvResponse, error) {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
@@ -334,7 +327,6 @@ func (s *k8sServer) UpdateEnv(ctx context.Context, req *pluginv1.UpdateEnvReques
 	return &pluginv1.UpdateEnvResponse{UpdatedEnv: current}, nil
 }
 
-
 func (s *k8sServer) IsHealthy(ctx context.Context, req *pluginv1.IsHealthyRequest) (*pluginv1.IsHealthyResponse, error) {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
@@ -348,7 +340,6 @@ func (s *k8sServer) IsHealthy(ctx context.Context, req *pluginv1.IsHealthyReques
 
 	return &pluginv1.IsHealthyResponse{WaitNanos: wait.Nanoseconds()}, nil
 }
-
 
 func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*pluginv1.RemoveResponse, error) {
 	envID := req.GetEnvironmentId()
