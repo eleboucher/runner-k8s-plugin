@@ -429,7 +429,6 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 	}
 
 	main.Command = []string{"sh", "-c", fmt.Sprintf("mkdir -p %s && sleep %d", k8sWorkDir, int64(timeout.Seconds()))}
-	main.WorkingDir = p.input.WorkingDir
 
 	for _, kv := range p.input.Env {
 		parts := strings.SplitN(kv, "=", 2)
