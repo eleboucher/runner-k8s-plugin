@@ -61,7 +61,7 @@ func TestK8sPod_CreatePod_DefaultSpec(t *testing.T) {
 	main := pod.Spec.Containers[0]
 	assert.Equal(t, k8sMainContainerName, main.Name)
 	assert.Equal(t, "node:22-bookworm", main.Image)
-	assert.Equal(t, "/shared/workdir", main.WorkingDir)
+	assert.Empty(t, main.WorkingDir)
 
 	envNames := make(map[string]string)
 	for _, e := range main.Env {
@@ -564,6 +564,22 @@ func TestNewK8sPod_NilConfig(t *testing.T) {
 	_, err := NewK8sPod(&container.NewContainerInput{Image: "test"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "K8sPodConfig is required")
+}
+
+func TestK8sPod_Exec_FallsBackToInputWorkingDir(t *testing.T) {
+	p := &K8sPod{input: container.NewContainerInput{WorkingDir: "/shared/workdir"}}
+
+	err := p.Exec([]string{"echo"}, nil, "", "")(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `create workdir "/shared/workdir"`)
+}
+
+func TestK8sPod_Exec_ExplicitWorkdirTakesPrecedence(t *testing.T) {
+	p := &K8sPod{input: container.NewContainerInput{WorkingDir: "/shared/workdir"}}
+
+	err := p.Exec([]string{"echo"}, nil, "", "/explicit")(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `create workdir "/explicit"`)
 }
 
 func TestK8sPod_CreatePod_ExtraLabels(t *testing.T) {
