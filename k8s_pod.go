@@ -129,6 +129,13 @@ func (p *K8sPod) Exec(command []string, env map[string]string, user, workdir str
 			slog.Debug("ignoring user parameter", "user", user)
 		}
 
+		// Fall back to the configured workdir (equivalent to Docker's container
+		// WorkingDir) so that callers like run-steps that pass an empty workdir
+		// still execute inside the repository checkout directory.
+		if workdir == "" && p.input.WorkingDir != "" {
+			workdir = p.input.WorkingDir
+		}
+
 		if workdir != "" {
 			if err := p.mkdir(ctx, workdir); err != nil {
 				return fmt.Errorf("create workdir %q: %w", workdir, err)
