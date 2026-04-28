@@ -4,7 +4,7 @@ go 1.25.0
 
 toolchain go1.26.2
 
-replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260424154328-63d5504927ba
+replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260428130308-491dbf7cf4c8
 
 require (
 	code.forgejo.org/forgejo/runner/v12 v12.9.0

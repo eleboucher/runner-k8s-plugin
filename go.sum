@@ -1,7 +1,7 @@
 dario.cat/mergo v1.0.2 h1:85+piFYR1tMbRrLcDwR18y4UKJ3aH1Tbzi24VRW1TK8=
 dario.cat/mergo v1.0.2/go.mod h1:E/hbnu0NxMFBjpMIE34DRGLWqDy0g5FuKDhCb31ngxA=
-git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260424154328-63d5504927ba h1:qwPuKt8f58JbR7OCv2qrk4bFXRJoy5lo8ch1+X/kKtE=
-git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260424154328-63d5504927ba/go.mod h1:RimoUA56r4tvUMXHd1cCzD17Io8BmPoxalEGOox9WxU=
+git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260428130308-491dbf7cf4c8 h1:tpdZs9AsiKyLwp3a7o8RLvwesLMuOo8MGInojSnqkd0=
+git.erwanleboucher.dev/eleboucher/runner/v12 v12.0.0-20260428130308-491dbf7cf4c8/go.mod h1:RimoUA56r4tvUMXHd1cCzD17Io8BmPoxalEGOox9WxU=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8afgbRMd7mFxO99hRNu+6tazq8nFF9lIwo9JFroBk=
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 h1:L/gRVlceqvL25UVaW/CKtUDjefjrs0SPonmDGUVOYP0=
