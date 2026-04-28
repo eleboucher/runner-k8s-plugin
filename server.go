@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	k8sexec "k8s.io/client-go/util/exec"
 )
 
@@ -362,7 +363,7 @@ func (s *k8sServer) IsHealthy(ctx context.Context, req *pluginv1.IsHealthyReques
 		return nil, status.Errorf(codes.Internal, "ishealthy: %v", err)
 	}
 
-	return &pluginv1.IsHealthyResponse{WaitNanos: wait.Nanoseconds()}, nil
+	return &pluginv1.IsHealthyResponse{Wait: durationpb.New(wait)}, nil
 }
 
 func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*pluginv1.RemoveResponse, error) {
