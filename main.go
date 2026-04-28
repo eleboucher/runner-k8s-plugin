@@ -24,6 +24,8 @@ import (
 )
 
 func main() {
+	configureLogging()
+
 	if os.Getenv(plugin.Handshake.MagicCookieKey) != "" {
 		goplugin.Serve(&goplugin.ServeConfig{
 			HandshakeConfig: plugin.Handshake,
@@ -73,13 +75,14 @@ func main() {
 	slog.Info("shutting down")
 	healthSrv.Shutdown()
 
+	// Drain RPCs before tearing down environments.
+	srv.GracefulStop()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer shutdownCancel()
 	if err := k8sSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown cleanup failed", "error", err)
 	}
-
-	srv.GracefulStop()
 }
 
 func listenOn(addr string) (net.Listener, error) {
@@ -91,6 +94,41 @@ func listenOn(addr string) (net.Listener, error) {
 		return nil, fmt.Errorf("invalid address %q: expected unix:///path or host:port", addr)
 	}
 	return net.Listen("tcp", addr)
+}
+
+// configureLogging sets the slog default handler. The runner spawns this
+// plugin via hashicorp/go-plugin, which has no built-in mechanism to
+// propagate its log level to the child process. To stay aligned with the
+// runner's level, the runner is expected to inject FORGEJO_RUNNER_LOG_LEVEL
+// (or HCLOG_LEVEL as a fallback) into the plugin's environment. When
+// neither is set we default to Info, matching the runner's own default.
+func configureLogging() {
+	level := slog.LevelInfo
+	for _, key := range []string{"FORGEJO_RUNNER_LOG_LEVEL", "HCLOG_LEVEL"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			if parsed, ok := parseLogLevel(v); ok {
+				level = parsed
+			}
+			break
+		}
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: level,
+	})))
+}
+
+func parseLogLevel(s string) (slog.Level, bool) {
+	switch strings.ToLower(s) {
+	case "trace", "debug":
+		return slog.LevelDebug, true
+	case "info":
+		return slog.LevelInfo, true
+	case "warn", "warning":
+		return slog.LevelWarn, true
+	case "error", "err":
+		return slog.LevelError, true
+	}
+	return slog.LevelInfo, false
 }
 
 func recoveryUnary() grpc.UnaryServerInterceptor {
