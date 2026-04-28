@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +18,24 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	k8sexec "k8s.io/client-go/util/exec"
 )
+
+// runnerArch maps GOARCH to the values exposed via ${{ runner.arch }}.
+func runnerArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "X64"
+	case "386":
+		return "X86"
+	case "arm64":
+		return "ARM64"
+	case "arm":
+		return "ARM"
+	default:
+		return runtime.GOARCH
+	}
+}
 
 type k8sEnvironment struct {
 	pod    *K8sPod
@@ -67,7 +86,7 @@ func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequ
 		SupportsLocalCopy:          true,
 		RunnerContext: map[string]string{
 			"os":         "Linux",
-			"arch":       "x86_64",
+			"arch":       runnerArch(),
 			"temp":       "/tmp",
 			"tool_cache": k8sToolCache,
 		},
@@ -207,8 +226,13 @@ func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingS
 	exitCode := int32(0)
 	errorMsg := ""
 	if execErr != nil {
-		exitCode = 1
-		errorMsg = execErr.Error()
+		var ce k8sexec.CodeExitError
+		if errors.As(execErr, &ce) {
+			exitCode = int32(ce.Code)
+		} else {
+			exitCode = 1
+			errorMsg = execErr.Error()
+		}
 	}
 
 	mu.Lock()

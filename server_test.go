@@ -67,3 +67,9 @@ func TestK8sServer_NewServer_HasInstanceID(t *testing.T) {
 	assert.NotEmpty(t, s.pluginInstanceID)
 	assert.NotNil(t, s.envs)
 }
+
+func TestRunnerArch(t *testing.T) {
+	got := runnerArch()
+	assert.NotEmpty(t, got)
+	assert.Contains(t, []string{"X64", "X86", "ARM64", "ARM"}, got)
+}
