@@ -213,12 +213,15 @@ func TestK8sPod_CreatePod_MissingPodSpecFile(t *testing.T) {
 }
 
 func TestK8sPod_WaitForPodRunning(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
 	watcher := watch.NewFake()
 	fakeClient.PrependWatchReactor("pods", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sPod(t, fakeClient)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"}}
 
 	go func() {
 		watcher.Modify(&corev1.Pod{
@@ -235,12 +238,15 @@ func TestK8sPod_WaitForPodRunning(t *testing.T) {
 }
 
 func TestK8sPod_WaitForPodRunning_PodFailed(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
 	watcher := watch.NewFake()
 	fakeClient.PrependWatchReactor("pods", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sPod(t, fakeClient)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"}}
 
 	go func() {
 		watcher.Modify(&corev1.Pod{
@@ -256,12 +262,15 @@ func TestK8sPod_WaitForPodRunning_PodFailed(t *testing.T) {
 }
 
 func TestK8sPod_WaitForPodRunning_PodDeleted(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
 	watcher := watch.NewFake()
 	fakeClient.PrependWatchReactor("pods", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sPod(t, fakeClient)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"}}
 
 	go func() {
 		watcher.Delete(&corev1.Pod{ObjectMeta: pod.ObjectMeta})
@@ -273,13 +282,16 @@ func TestK8sPod_WaitForPodRunning_PodDeleted(t *testing.T) {
 }
 
 func TestK8sPod_WaitForPodRunning_Timeout(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
 	fakeWatcher := watch.NewFake()
 	fakeClient.PrependWatchReactor("pods", k8stesting.DefaultWatchReactor(fakeWatcher, nil))
 
 	p := newTestK8sPod(t, fakeClient)
 	p.config.PollTimeout = 100 * time.Millisecond
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"}}
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)
@@ -289,6 +301,16 @@ func TestK8sPod_WaitForPodRunning_Timeout(t *testing.T) {
 	err := p.waitForPodRunning(t.Context(), pod)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestK8sPod_WaitForPodRunning_AlreadyRunningOnGet(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	p := newTestK8sPod(t, fakeClient)
+	require.NoError(t, p.waitForPodRunning(t.Context(), pod))
 }
 
 func TestK8sPod_DeletePod(t *testing.T) {
@@ -365,6 +387,160 @@ func TestK8sPod_AddServiceContainerRaw(t *testing.T) {
 	assert.Equal(t, "postgres", p.services[1].name)
 	assert.Len(t, p.services[1].ports, 1)
 	assert.Equal(t, int32(5432), p.services[1].ports[0].ContainerPort)
+}
+
+func TestK8sPod_AddServiceContainerRaw_PortVariants(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    []string
+		expected []int32
+	}{
+		{"plain", []string{"8080"}, []int32{8080}},
+		{"host_container", []string{"5432:5433"}, []int32{5433}},
+		{"with_proto", []string{"5432:5433/tcp"}, []int32{5433}},
+		{"ip_bound", []string{"127.0.0.1:5432:5433"}, []int32{5433}},
+		{"trims_trailing_proto_only", []string{"6379/tcp"}, []int32{6379}},
+		{"invalid_skipped", []string{"abc", "0", "65536", "8080"}, []int32{8080}},
+		{"empty_skipped", []string{"", "9090"}, []int32{9090}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &K8sPod{}
+			p.AddServiceContainerRaw("svc", "img:1", nil, tc.input)
+			require.Len(t, p.services, 1)
+			got := make([]int32, 0, len(p.services[0].ports))
+			for _, port := range p.services[0].ports {
+				got = append(got, port.ContainerPort)
+			}
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestK8sPod_IsHealthy_MainContainerTerminated(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: k8sMainContainerName,
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 137,
+						Reason:   "OOMKilled",
+						Message:  "memory limit exceeded",
+					},
+				},
+			}},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	p := newTestK8sPod(t, fakeClient)
+	p.pod = pod
+
+	_, err := p.IsHealthy(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "main container terminated")
+	assert.Contains(t, err.Error(), "OOMKilled")
+	assert.Contains(t, err.Error(), "137")
+}
+
+func TestK8sPod_IsHealthy_MainContainerCrashLoop(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: k8sMainContainerName,
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "CrashLoopBackOff",
+						Message: "back-off restarting failed container",
+					},
+				},
+			}},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	p := newTestK8sPod(t, fakeClient)
+	p.pod = pod
+
+	_, err := p.IsHealthy(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CrashLoopBackOff")
+}
+
+func TestK8sPod_IsHealthy_IgnoresSidecarStatuses(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test-ns"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: k8sMainContainerName, Ready: true},
+				{
+					Name: "redis-sidecar",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+					},
+				},
+			},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	p := newTestK8sPod(t, fakeClient)
+	p.pod = pod
+
+	_, err := p.IsHealthy(t.Context())
+	require.NoError(t, err)
+}
+
+func TestPodPhaseTerminal(t *testing.T) {
+	cases := []struct {
+		phase    corev1.PodPhase
+		done     bool
+		errMatch string
+	}{
+		{corev1.PodRunning, true, ""},
+		{corev1.PodFailed, true, "pod failed"},
+		{corev1.PodSucceeded, true, "completed unexpectedly"},
+		{corev1.PodPending, false, ""},
+		{corev1.PodUnknown, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.phase), func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{Phase: tc.phase}}
+			done, err := podPhaseTerminal(pod)
+			assert.Equal(t, tc.done, done)
+			if tc.errMatch == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errMatch)
+			}
+		})
+	}
+}
+
+func TestK8sPod_CreatePod_DropsPodSpecCommand(t *testing.T) {
+	tmpFile := t.TempDir() + "/podspec.yaml"
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`containers:
+  - name: main
+    image: custom:1
+    command: ["/bin/should-be-dropped"]
+    workingDir: /from/podspec
+`), 0o644))
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sPod(t, fakeClient)
+	p.input.Image = k8sPodSpecImageSentinel
+	p.input.WorkingDir = ""
+	p.config.PodSpec = tmpFile
+
+	pod, err := p.createPod(t.Context())
+	require.NoError(t, err)
+	main := pod.Spec.Containers[0]
+	assert.NotContains(t, main.Command, "/bin/should-be-dropped")
+	assert.Contains(t, main.Command[2], "sleep")
+	assert.Equal(t, "/from/podspec", main.WorkingDir)
 }
 
 func TestK8sPod_ReplaceLogWriter(t *testing.T) {
