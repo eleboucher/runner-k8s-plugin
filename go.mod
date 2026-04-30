@@ -9,7 +9,7 @@ replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher
 require (
 	code.forgejo.org/forgejo/runner/v12 v12.9.0
 	github.com/google/uuid v1.6.0
-	github.com/hashicorp/go-plugin v1.7.0
+	github.com/hashicorp/go-plugin v1.8.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
