@@ -430,7 +430,7 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "forgejo-runner-",
+			GenerateName: "forgejo-runner-task-",
 			Namespace:    p.namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "forgejo-runner",
