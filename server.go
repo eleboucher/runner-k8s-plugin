@@ -22,6 +22,25 @@ import (
 	k8sexec "k8s.io/client-go/util/exec"
 )
 
+// parseLabels parses "k=v,k=v" pairs. ${ENV_ID} in values expands to envID.
+func parseLabels(raw, envID string) map[string]string {
+	labels := make(map[string]string)
+	for pair := range strings.SplitSeq(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(pair, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			slog.Warn("ignoring malformed label", "entry", pair)
+			continue
+		}
+		labels[k] = strings.ReplaceAll(strings.TrimSpace(v), "${ENV_ID}", envID)
+	}
+	return labels
+}
+
 // runnerArch maps GOARCH to the values exposed via ${{ runner.arch }}.
 func runnerArch() string {
 	switch runtime.GOARCH {
@@ -152,10 +171,11 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	}
 
 	envID := uuid.New().String()
-	pod.extraLabels = map[string]string{
-		"forgejo-runner/environment-id":  envID,
-		"forgejo-runner/plugin-instance": s.pluginInstanceID,
-	}
+	// Set plugin-internal labels after user labels so they can't be shadowed.
+	labels := parseLabels(opts["labels"], envID)
+	labels["forgejo-runner/environment-id"] = envID
+	labels["forgejo-runner/plugin-instance"] = s.pluginInstanceID
+	pod.extraLabels = labels
 
 	// Add service containers
 	for _, svc := range req.GetServices() {

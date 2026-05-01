@@ -61,8 +61,27 @@ Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
 | `kubeconfig` | in-cluster | Path to kubeconfig file |
 | `poll_timeout` | `10m` | Timeout waiting for pod readiness |
 | `podspec` | — | Default PodSpec path (overridden by label arg) |
+| `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
 
 The runner also injects `label_arg` (per-job label argument, e.g. PodSpec path) and `job_timeout` automatically.
+
+Pods always carry `app.kubernetes.io/managed-by=forgejo-runner`, `forgejo-runner/environment-id`, and `forgejo-runner/plugin-instance`. Use `labels` for anything else:
+
+```yaml
+# v1
+plugins:
+  k8s:
+    address: "unix:///var/run/forgejo-runner-k8s.sock"
+    options:
+      labels: "app.kubernetes.io/name=forgejo-runner,app.kubernetes.io/instance=runner-${ENV_ID}"
+
+# v2
+pluginsv2:
+  k8s:
+    path: /usr/local/bin/forgejo-runner-k8s
+    options:
+      labels: "app.kubernetes.io/name=forgejo-runner,app.kubernetes.io/instance=runner-${ENV_ID}"
+```
 
 ## PodSpec files
 

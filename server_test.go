@@ -73,3 +73,47 @@ func TestRunnerArch(t *testing.T) {
 	assert.NotEmpty(t, got)
 	assert.Contains(t, []string{"X64", "X86", "ARM64", "ARM"}, got)
 }
+
+func TestParseLabels(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		envID string
+		want  map[string]string
+	}{
+		{"empty", "", "env-1", map[string]string{}},
+		{
+			"single",
+			"app.kubernetes.io/name=forgejo-runner",
+			"env-1",
+			map[string]string{"app.kubernetes.io/name": "forgejo-runner"},
+		},
+		{
+			"multiple_with_whitespace",
+			" app.kubernetes.io/name = forgejo-runner , app.kubernetes.io/part-of = ci ",
+			"env-1",
+			map[string]string{
+				"app.kubernetes.io/name":    "forgejo-runner",
+				"app.kubernetes.io/part-of": "ci",
+			},
+		},
+		{
+			"env_id_substitution",
+			"app.kubernetes.io/instance=runner-${ENV_ID}",
+			"abc-123",
+			map[string]string{"app.kubernetes.io/instance": "runner-abc-123"},
+		},
+		{
+			"malformed_entries_skipped",
+			"=novalue,nokey,valid=ok,",
+			"env-1",
+			map[string]string{"valid": "ok"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLabels(tc.raw, tc.envID)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
