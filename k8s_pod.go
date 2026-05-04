@@ -24,12 +24,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/scheme"
+	"k8s.io/streaming/pkg/httpstream"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
