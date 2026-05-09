@@ -39,6 +39,5 @@ func NewK8sPod(input *container.NewContainerInput, config *K8sPodConfig) (*K8sPo
 		stdout:    input.Stdout,
 		stderr:    input.Stderr,
 	}
-	p.SetToolCache(k8sToolCache)
 	return p, nil
 }

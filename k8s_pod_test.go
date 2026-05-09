@@ -41,7 +41,6 @@ func newTestK8sPod(t *testing.T, fakeClient *fake.Clientset) *K8sPod {
 		stdout: io.Discard,
 		stderr: io.Discard,
 	}
-	p.SetToolCache(k8sToolCache)
 	return p
 }
 
@@ -560,8 +559,8 @@ func TestK8sPod_ReplaceLogWriter(t *testing.T) {
 func TestK8sPod_InterfaceMethods(t *testing.T) {
 	p := &K8sPod{}
 
-	assert.Equal(t, "k8spod", p.BackendName())
-	assert.False(t, p.SupportsDockerActions())
+	assert.Equal(t, "k8spod", p.BackendID())
+	assert.False(t, p.SupportsDockerContainerActions())
 	assert.True(t, p.ManagesOwnNetworking())
 	assert.Equal(t, k8sActPath, p.GetActPath())
 	assert.Equal(t, k8sSharedMount, p.GetRoot())

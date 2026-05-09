@@ -53,8 +53,6 @@ type serviceContainerSpec struct {
 }
 
 type K8sPod struct {
-	container.LinuxContainerEnvironmentExtensions
-
 	client      kubernetes.Interface
 	restCfg     *rest.Config
 	pod         *corev1.Pod
@@ -389,11 +387,11 @@ func (p *K8sPod) IsHealthy(ctx context.Context) (time.Duration, error) {
 	return 0, nil
 }
 
-func (*K8sPod) BackendName() string {
+func (*K8sPod) BackendID() string {
 	return "k8spod"
 }
 
-func (*K8sPod) SupportsDockerActions() bool {
+func (*K8sPod) SupportsDockerContainerActions() bool {
 	return false
 }
 
@@ -413,10 +411,30 @@ func (*K8sPod) GetName() string {
 	return "k8spod"
 }
 
-func (p *K8sPod) GetRunnerContext(ctx context.Context) map[string]any {
+func (*K8sPod) GetPathVariableName() string {
+	return "PATH"
+}
+
+func (*K8sPod) DefaultPathVariable() string {
+	return k8sDefaultPath
+}
+
+func (*K8sPod) JoinPathVariable(paths ...string) string {
+	return strings.Join(paths, ":")
+}
+
+func (*K8sPod) ToContainerPath(path string) string {
+	return path
+}
+
+func (*K8sPod) IsEnvironmentCaseInsensitive() bool {
+	return false
+}
+
+func (*K8sPod) GetRunnerContext(_ context.Context) map[string]any {
 	return map[string]any{
 		"os":         "Linux",
-		"arch":       container.RunnerArch(ctx),
+		"arch":       runnerArch(),
 		"temp":       "/tmp",
 		"tool_cache": k8sToolCache,
 	}
