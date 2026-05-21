@@ -29,20 +29,29 @@ jobs:
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.OWNER_PACKAGE_SECRET }}
 
+      - name: Login to registry.erwanleboucher.dev
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: registry.erwanleboucher.dev
+          username: ${{ vars.USERNAME }}
+          password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
+
       - name: Compute image metadata
         id: meta
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin
+            name=code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin
+            name=git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin
+            name=registry.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push (v1)
+      - name: Build and push
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -50,26 +59,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Compute v2 image metadata
-        id: meta-v2
-        uses: https://data.forgejo.org/docker/metadata-action@v6
-        with:
-          images: |
-            code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin-v2
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin-v2
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=long
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      - name: Build and push (v2)
-        uses: https://data.forgejo.org/docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.v2
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-v2.outputs.tags }}
-          labels: ${{ steps.meta-v2.outputs.labels }}
