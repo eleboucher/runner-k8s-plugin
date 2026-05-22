@@ -18,8 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"code.forgejo.org/forgejo/runner/v12/act/common"
 	"code.forgejo.org/forgejo/runner/v12/act/container"
 	batchv1 "k8s.io/api/batch/v1"
@@ -72,7 +70,6 @@ type K8sJob struct {
 	stderr     io.Writer
 	execCtx    context.Context
 	execCancel context.CancelFunc
-	execGroup  *errgroup.Group
 }
 
 func (p *K8sJob) AddServiceContainerRaw(name, image string, env map[string]string, ports []string) {
@@ -130,24 +127,27 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 			return fmt.Errorf("wait for job: %w", err)
 		}
 
-		p.job = job
 		slog.Info("job is running", "name", job.Name)
 
 		podName, err := p.waitForAllContainersReady(ctx)
 		if err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up job after containers ready failure", "error", delErr)
+			}
 			return fmt.Errorf("wait for containers to be ready: %w", err)
 		}
 		slog.Info("all containers ready", "name", job.Name)
 
-		if err := p.waitForExecReady(podName); err != nil {
+		if err := p.waitForExecReady(ctx, podName); err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up job after exec ready failure", "error", delErr)
+			}
 			return fmt.Errorf("wait for exec ready: %w", err)
 		}
 		slog.Debug("exec ready", "name", job.Name)
 
 		p.podName = podName
 		p.execCtx, p.execCancel = context.WithCancel(context.Background())
-		p.execGroup, _ = errgroup.WithContext(p.execCtx)
-		slog.Debug("exec ready", "name", job.Name)
 
 		return nil
 	}
@@ -212,10 +212,6 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 		})
 		if err != nil {
 			return fmt.Errorf("exec: %w", err)
-		}
-
-		if _, healthErr := p.IsHealthy(ctx); healthErr != nil {
-			return fmt.Errorf("pod unhealthy after exec: %w", healthErr)
 		}
 
 		return nil
@@ -325,6 +321,7 @@ func (r *tempFileReader) Close() error {
 	name := r.tmp.Name()
 	err := r.tmp.Close()
 	removeErr := os.Remove(name)
+	r.tmp = nil
 	if err == nil {
 		err = removeErr
 	}
@@ -402,10 +399,17 @@ func (p *K8sJob) GetContainerArchive(ctx context.Context, srcPath string) (io.Re
 		threshold: archiveBufferLimit,
 	}
 	var errBuf bytes.Buffer
-	if err := exec.StreamWithContext(p.execCtx, remotecommand.StreamOptions{
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: sw,
 		Stderr: &errBuf,
-	}); err != nil && !isClosedStreamError(err) {
+	}); err != nil {
+		if sw.tmp != nil {
+			sw.tmp.Close()
+			os.Remove(sw.tmp.Name())
+		}
+		if isClosedStreamError(err) {
+			return nil, fmt.Errorf("tar exec: stream closed (container may have terminated)")
+		}
 		return nil, fmt.Errorf("tar exec: %w (stderr: %s)", err, errBuf.String())
 	}
 
@@ -821,7 +825,7 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 	}
 }
 
-func (p *K8sJob) waitForExecReady(podName string) error {
+func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 	if p.job == nil {
 		return errors.New("job not started")
 	}
@@ -835,6 +839,12 @@ func (p *K8sJob) waitForExecReady(podName string) error {
 	slog.Info("waiting for exec to be ready", "job", p.job.Name, "pod", podName, "deadline", deadline)
 
 	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		exec, err := p.newExecCommand(podName, &corev1.PodExecOptions{
 			Container: k8sMainContainerName,
 			Command:   []string{"echo", "ready"},
@@ -847,7 +857,7 @@ func (p *K8sJob) waitForExecReady(podName string) error {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: io.Discard, Stderr: io.Discard,
 		})
 		if err != nil {
@@ -885,9 +895,6 @@ func (p *K8sJob) deleteJob(ctx context.Context) error {
 	if p.execCancel != nil {
 		p.execCancel()
 	}
-	if p.execGroup != nil {
-		_ = p.execGroup.Wait()
-	}
 	propagation := metav1.DeletePropagationForeground
 	err := p.client.BatchV1().Jobs(p.namespace).Delete(ctx, p.job.Name, metav1.DeleteOptions{
 		PropagationPolicy:  &propagation,
@@ -900,33 +907,6 @@ func (p *K8sJob) deleteJob(ctx context.Context) error {
 	return nil
 }
 
-func (p *K8sJob) getPodNameForJob(jobName string) (string, error) {
-	pods, err := p.client.CoreV1().Pods(p.namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
-	})
-	if err != nil {
-		return "", fmt.Errorf("list pods for job %q: %w", jobName, err)
-	}
-	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no pods found for job %q", jobName)
-	}
-
-	// Prefer a Running pod; fall back to the first available.
-	var running, first string
-	for _, pod := range pods.Items {
-		if first == "" {
-			first = pod.Name
-		}
-		if pod.Status.Phase == corev1.PodRunning {
-			running = pod.Name
-		}
-	}
-	if running != "" {
-		return running, nil
-	}
-	return first, nil
-}
-
 // isClosedStreamError reports whether err is a network error caused by the
 // container or its network being torn down mid-stream.
 func isClosedStreamError(err error) bool {
@@ -935,8 +915,7 @@ func isClosedStreamError(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "use of closed network connection") ||
-		strings.Contains(s, "read/write on closed pipe") ||
-		strings.Contains(s, "next reader")
+		strings.Contains(s, "read/write on closed pipe")
 }
 
 // teeStderr always captures into errBuf so error messages can include stderr,
@@ -985,10 +964,13 @@ func (p *K8sJob) execTarExtract(ctx context.Context, destPath string, input io.R
 	p.mu.Unlock()
 
 	var errBuf bytes.Buffer
-	if err := exec.StreamWithContext(p.execCtx, remotecommand.StreamOptions{
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin:  input,
 		Stderr: teeStderr(&errBuf, stderr),
-	}); err != nil && !isClosedStreamError(err) {
+	}); err != nil {
+		if isClosedStreamError(err) {
+			return fmt.Errorf("tar extract to %q: stream closed (container may have terminated)", destPath)
+		}
 		return fmt.Errorf("tar extract to %q: %w (stderr: %s)", destPath, err, strings.TrimSpace(errBuf.String()))
 	}
 	return nil

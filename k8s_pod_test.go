@@ -581,36 +581,6 @@ func TestK8sJob_Start_CleansUpOnWaitFailure(t *testing.T) {
 }
 
 
-func TestK8sJob_GetPodNameForJob(t *testing.T) {
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"}}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-job-abcde",
-			Namespace: "test-ns",
-			Labels:    map[string]string{"batch.kubernetes.io/job-name": "test-job"},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-	fakeClient := fake.NewSimpleClientset(job, pod)
-	p := newTestK8sJob(t, fakeClient)
-	p.job = job
-
-	name, err := p.getPodNameForJob("test-job")
-	require.NoError(t, err)
-	assert.Equal(t, "test-job-abcde", name)
-}
-
-func TestK8sJob_GetPodNameForJob_NoPods(t *testing.T) {
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"}}
-	fakeClient := fake.NewSimpleClientset(job)
-	p := newTestK8sJob(t, fakeClient)
-	p.job = job
-
-	_, err := p.getPodNameForJob("test-job")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no pods found")
-}
-
 func TestK8sJob_Create_StoresCapabilities(t *testing.T) {
 	p := &K8sJob{}
 	require.NoError(t, p.Create([]string{"NET_ADMIN", "SYS_PTRACE"}, []string{"ALL"})(t.Context()))
@@ -641,7 +611,7 @@ func TestK8sJob_WaitForExecReady_NilJob(t *testing.T) {
 	p.job = nil
 	p.config.PollTimeout = 100 * time.Millisecond
 
-	err := p.waitForExecReady("any-pod")
+	err := p.waitForExecReady(context.Background(), "any-pod")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "job not started")
 }
