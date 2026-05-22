@@ -18,8 +18,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"code.forgejo.org/forgejo/runner/v12/act/common"
 	"code.forgejo.org/forgejo/runner/v12/act/container"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,7 +32,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/scheme"
-	"k8s.io/streaming/pkg/httpstream"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
@@ -37,7 +39,7 @@ import (
 // k8sPodSpecImageSentinel means "defer to the podspec's image".
 const k8sPodSpecImageSentinel = "k8spod"
 
-type K8sPodConfig struct {
+type K8sJobConfig struct {
 	Namespace   string
 	PodSpec     string // path to podspec YAML file
 	KubeConfig  string
@@ -52,24 +54,28 @@ type serviceContainerSpec struct {
 	ports []corev1.ContainerPort
 }
 
-type K8sPod struct {
+type K8sJob struct {
 	client      kubernetes.Interface
 	restCfg     *rest.Config
-	pod         *corev1.Pod
+	job         *batchv1.Job
+	podName     string // discovered pod name, valid after Start completes
 	namespace   string
 	input       container.NewContainerInput
-	config      *K8sPodConfig
+	config      *K8sJobConfig
 	services    []serviceContainerSpec
 	capAdd      []string
 	capDrop     []string
 	extraLabels map[string]string
 
-	mu     sync.Mutex
-	stdout io.Writer
-	stderr io.Writer
+	mu         sync.Mutex
+	stdout     io.Writer
+	stderr     io.Writer
+	execCtx    context.Context
+	execCancel context.CancelFunc
+	execGroup  *errgroup.Group
 }
 
-func (p *K8sPod) AddServiceContainerRaw(name, image string, env map[string]string, ports []string) {
+func (p *K8sJob) AddServiceContainerRaw(name, image string, env map[string]string, ports []string) {
 	k8sEnv := make([]corev1.EnvVar, 0, len(env))
 	for k, v := range env {
 		k8sEnv = append(k8sEnv, corev1.EnvVar{Name: k, Value: v})
@@ -101,7 +107,7 @@ func (p *K8sPod) AddServiceContainerRaw(name, image string, env map[string]strin
 	p.mu.Unlock()
 }
 
-func (p *K8sPod) Create(capAdd, capDrop []string) common.Executor {
+func (p *K8sJob) Create(capAdd, capDrop []string) common.Executor {
 	return func(_ context.Context) error {
 		p.capAdd = capAdd
 		p.capDrop = capDrop
@@ -109,34 +115,45 @@ func (p *K8sPod) Create(capAdd, capDrop []string) common.Executor {
 	}
 }
 
-func (p *K8sPod) Start(_ bool) common.Executor {
+func (p *K8sJob) Start(_ bool) common.Executor {
 	return func(ctx context.Context) error {
-		pod, err := p.createPod(ctx)
+		job, err := p.createJob(ctx)
 		if err != nil {
-			return fmt.Errorf("create pod: %w", err)
+			return fmt.Errorf("create job: %w", err)
 		}
-		slog.Info("created pod", "namespace", pod.Namespace, "name", pod.Name)
+		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
 
-		if err := p.waitForPodRunning(ctx, pod); err != nil {
-			if delErr := p.deletePod(context.Background()); delErr != nil {
-				slog.Warn("failed to clean up pod after startup failure", "error", delErr)
+		if err := p.waitForJobRunning(ctx, job); err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up job after startup failure", "error", delErr)
 			}
-			return fmt.Errorf("wait for pod: %w", err)
+			return fmt.Errorf("wait for job: %w", err)
 		}
 
-		p.pod = pod
-		slog.Info("pod is running", "name", pod.Name)
+		p.job = job
+		slog.Info("job is running", "name", job.Name)
 
-		if err := p.waitForAllContainersReady(ctx); err != nil {
+		podName, err := p.waitForAllContainersReady(ctx)
+		if err != nil {
 			return fmt.Errorf("wait for containers to be ready: %w", err)
 		}
-		slog.Info("all containers ready", "name", pod.Name)
+		slog.Info("all containers ready", "name", job.Name)
+
+		if err := p.waitForExecReady(podName); err != nil {
+			return fmt.Errorf("wait for exec ready: %w", err)
+		}
+		slog.Debug("exec ready", "name", job.Name)
+
+		p.podName = podName
+		p.execCtx, p.execCancel = context.WithCancel(context.Background())
+		p.execGroup, _ = errgroup.WithContext(p.execCtx)
+		slog.Debug("exec ready", "name", job.Name)
 
 		return nil
 	}
 }
 
-func (p *K8sPod) Exec(command []string, env map[string]string, user, workdir string) common.Executor {
+func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir string) common.Executor {
 	return func(ctx context.Context) error {
 		if user != "" {
 			slog.Debug("ignoring user parameter", "user", user)
@@ -177,7 +194,7 @@ func (p *K8sPod) Exec(command []string, env map[string]string, user, workdir str
 		stdout, stderr := p.stdout, p.stderr
 		p.mu.Unlock()
 
-		exec, err := p.newExecCommand(&corev1.PodExecOptions{
+		exec, err := p.newExecCommand(p.podName, &corev1.PodExecOptions{
 			Container: k8sMainContainerName,
 			Command:   fullCmd,
 			Stdin:     false,
@@ -205,7 +222,7 @@ func (p *K8sPod) Exec(command []string, env map[string]string, user, workdir str
 	}
 }
 
-func (p *K8sPod) Copy(destPath string, files ...*container.FileEntry) common.Executor {
+func (p *K8sJob) Copy(destPath string, files ...*container.FileEntry) common.Executor {
 	return func(ctx context.Context) error {
 		if err := p.mkdir(ctx, destPath); err != nil {
 			return fmt.Errorf("mkdir %q: %w", destPath, err)
@@ -244,7 +261,7 @@ func (p *K8sPod) Copy(destPath string, files ...*container.FileEntry) common.Exe
 	}
 }
 
-func (p *K8sPod) CopyDir(destPath, srcPath string, _ bool) common.Executor {
+func (p *K8sJob) CopyDir(destPath, srcPath string, _ bool) common.Executor {
 	return func(ctx context.Context) error {
 		if err := p.mkdir(ctx, destPath); err != nil {
 			return fmt.Errorf("mkdir %q: %w", destPath, err)
@@ -268,7 +285,7 @@ func (p *K8sPod) CopyDir(destPath, srcPath string, _ bool) common.Executor {
 	}
 }
 
-func (p *K8sPod) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
+func (p *K8sJob) CopyTarStream(ctx context.Context, destPath string, tarStream io.Reader) error {
 	if err := p.mkdir(ctx, destPath); err != nil {
 		return fmt.Errorf("mkdir %q: %w", destPath, err)
 	}
@@ -287,11 +304,90 @@ func (p *K8sPod) CopyTarStream(ctx context.Context, destPath string, tarStream i
 	return p.execTarExtract(ctx, destPath, pr)
 }
 
-func (p *K8sPod) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
+// archiveBufferLimit is the threshold at which GetContainerArchive switches
+// from memory buffering to spilling to a temp file.
+const archiveBufferLimit = 50 * 1024 * 1024 // 50MB
+
+// tempFileReader wraps an open temp file for reading as an io.ReadCloser.
+// The file is removed when Close is called.
+type tempFileReader struct {
+	tmp *os.File
+}
+
+func (r *tempFileReader) Read(p []byte) (int, error) {
+	return r.tmp.Read(p)
+}
+
+func (r *tempFileReader) Close() error {
+	if r.tmp == nil {
+		return nil
+	}
+	name := r.tmp.Name()
+	err := r.tmp.Close()
+	removeErr := os.Remove(name)
+	if err == nil {
+		err = removeErr
+	}
+	return err
+}
+
+// spillWriter writes to a buffer initially, then spills to a temp file once
+// the threshold is exceeded. This allows GetContainerArchive to handle both
+// small and large archives without OOM for small ones while streaming large
+// ones to disk instead of memory.
+type spillWriter struct {
+	buf       *bytes.Buffer
+	tmp       *os.File
+	threshold int64
+	written   int64
+}
+
+func (s *spillWriter) Write(p []byte) (int, error) {
+	if s.tmp != nil {
+		n, err := s.tmp.Write(p)
+		s.written += int64(n)
+		return n, err
+	}
+	if s.written+int64(len(p)) > s.threshold {
+		if err := s.spillToDisk(p); err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	n, err := s.buf.Write(p)
+	s.written += int64(n)
+	return n, err
+}
+
+func (s *spillWriter) spillToDisk(firstChunk []byte) error {
+	tmp, err := os.CreateTemp("", "forgejo-archive-*.tar")
+	if err != nil {
+		return fmt.Errorf("create temp file for archive overflow: %w", err)
+	}
+	s.tmp = tmp
+	if _, err := s.buf.WriteTo(tmp); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		s.tmp = nil
+		return fmt.Errorf("spill buffer to temp file: %w", err)
+	}
+	if len(firstChunk) > 0 {
+		if _, err := tmp.Write(firstChunk); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			s.tmp = nil
+			return fmt.Errorf("write first chunk after spill: %w", err)
+		}
+		s.written += int64(len(firstChunk))
+	}
+	return nil
+}
+
+func (p *K8sJob) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
 	dir := filepath.Dir(srcPath)
 	base := filepath.Base(srcPath)
 
-	exec, err := p.newExecCommand(&corev1.PodExecOptions{
+	exec, err := p.newExecCommand(p.podName, &corev1.PodExecOptions{
 		Container: k8sMainContainerName,
 		Command:   []string{"tar", "cf", "-", "-C", dir, base},
 		Stdout:    true,
@@ -301,56 +397,62 @@ func (p *K8sPod) GetContainerArchive(ctx context.Context, srcPath string) (io.Re
 		return nil, fmt.Errorf("setup tar exec: %w", err)
 	}
 
-	pr, pw := io.Pipe()
-	go func() {
-		var errBuf bytes.Buffer
-		err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-			Stdout: pw,
-			Stderr: &errBuf,
-		})
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("tar exec: %w (stderr: %s)", err, errBuf.String()))
-		} else {
-			pw.Close()
+	sw := &spillWriter{
+		buf:       new(bytes.Buffer),
+		threshold: archiveBufferLimit,
+	}
+	var errBuf bytes.Buffer
+	if err := exec.StreamWithContext(p.execCtx, remotecommand.StreamOptions{
+		Stdout: sw,
+		Stderr: &errBuf,
+	}); err != nil && !isClosedStreamError(err) {
+		return nil, fmt.Errorf("tar exec: %w (stderr: %s)", err, errBuf.String())
+	}
+
+	if sw.tmp != nil {
+		if _, err := sw.tmp.Seek(0, 0); err != nil {
+			sw.tmp.Close()
+			os.Remove(sw.tmp.Name())
+			return nil, fmt.Errorf("seek temp file: %w", err)
 		}
-	}()
-
-	return pr, nil
+		return &tempFileReader{tmp: sw.tmp}, nil
+	}
+	return io.NopCloser(bytes.NewReader(sw.buf.Bytes())), nil
 }
 
-func (p *K8sPod) Pull(_ bool) common.Executor {
+func (p *K8sJob) Pull(_ bool) common.Executor {
 	return func(_ context.Context) error {
 		return nil
 	}
 }
 
-func (p *K8sPod) ConnectToNetwork(_ string) common.Executor {
+func (p *K8sJob) ConnectToNetwork(_ string) common.Executor {
 	return func(_ context.Context) error {
 		return nil
 	}
 }
 
-func (p *K8sPod) UpdateFromEnv(srcPath string, env *map[string]string) common.Executor {
+func (p *K8sJob) UpdateFromEnv(srcPath string, env *map[string]string) common.Executor {
 	return container.ParseEnvFile(p, srcPath, env).IfNot(common.Dryrun)
 }
 
-func (p *K8sPod) UpdateFromImageEnv(_ *map[string]string) common.Executor {
+func (p *K8sJob) UpdateFromImageEnv(_ *map[string]string) common.Executor {
 	return func(_ context.Context) error {
 		return nil
 	}
 }
 
-func (p *K8sPod) Remove() common.Executor {
+func (p *K8sJob) Remove() common.Executor {
 	return func(ctx context.Context) error {
-		return p.deletePod(ctx)
+		return p.deleteJob(ctx)
 	}
 }
 
-func (p *K8sPod) Close() common.Executor {
+func (p *K8sJob) Close() common.Executor {
 	return p.Remove()
 }
 
-func (p *K8sPod) ReplaceLogWriter(stdout, stderr io.Writer) (io.Writer, io.Writer) {
+func (p *K8sJob) ReplaceLogWriter(stdout, stderr io.Writer) (io.Writer, io.Writer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	oldStdout := p.stdout
@@ -360,78 +462,76 @@ func (p *K8sPod) ReplaceLogWriter(stdout, stderr io.Writer) (io.Writer, io.Write
 	return oldStdout, oldStderr
 }
 
-func (p *K8sPod) IsHealthy(ctx context.Context) (time.Duration, error) {
-	if p.pod == nil {
-		return 0, errors.New("pod not started")
+func (p *K8sJob) IsHealthy(ctx context.Context) (time.Duration, error) {
+	if p.job == nil {
+		return 0, errors.New("job not started")
 	}
-	pod, err := p.client.CoreV1().Pods(p.namespace).Get(ctx, p.pod.Name, metav1.GetOptions{})
+	job, err := p.client.BatchV1().Jobs(p.namespace).Get(ctx, p.job.Name, metav1.GetOptions{})
 	if err != nil {
-		return 0, fmt.Errorf("get pod status: %w", err)
+		return 0, fmt.Errorf("get job status: %w", err)
 	}
-	if pod.Status.Phase != corev1.PodRunning {
-		return 0, fmt.Errorf("pod is %s: reason=%s message=%s", pod.Status.Phase, pod.Status.Reason, pod.Status.Message)
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return 0, fmt.Errorf("job failed: reason=%s message=%s", cond.Reason, cond.Message)
+		}
 	}
-	// Phase==Running can mask a dead main container; inspect it directly.
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name != k8sMainContainerName {
-			continue
-		}
-		if cs.State.Terminated != nil {
-			return 0, fmt.Errorf("main container terminated: exit=%d reason=%s message=%s",
-				cs.State.Terminated.ExitCode, cs.State.Terminated.Reason, cs.State.Terminated.Message)
-		}
-		if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
-			return 0, fmt.Errorf("main container in CrashLoopBackOff: %s", cs.State.Waiting.Message)
-		}
+	if job.Status.Active > 0 {
+		return 0, nil
+	}
+	if job.Status.Succeeded > 0 {
+		return 0, errors.New("job completed unexpectedly")
+	}
+	if job.Status.Failed > 0 {
+		return 0, errors.New("job failed")
 	}
 	return 0, nil
 }
 
-func (*K8sPod) BackendID() string {
-	return "k8spod"
+func (*K8sJob) BackendID() string {
+	return "k8sjob"
 }
 
-func (*K8sPod) SupportsDockerContainerActions() bool {
+func (*K8sJob) SupportsDockerContainerActions() bool {
 	return false
 }
 
-func (*K8sPod) ManagesOwnNetworking() bool {
+func (*K8sJob) ManagesOwnNetworking() bool {
 	return true
 }
 
-func (*K8sPod) GetActPath() string {
+func (*K8sJob) GetActPath() string {
 	return k8sActPath
 }
 
-func (*K8sPod) GetRoot() string {
+func (*K8sJob) GetRoot() string {
 	return k8sSharedMount
 }
 
-func (*K8sPod) GetName() string {
-	return "k8spod"
+func (*K8sJob) GetName() string {
+	return "k8sjob"
 }
 
-func (*K8sPod) GetPathVariableName() string {
+func (*K8sJob) GetPathVariableName() string {
 	return "PATH"
 }
 
-func (*K8sPod) DefaultPathVariable() string {
+func (*K8sJob) DefaultPathVariable() string {
 	return k8sDefaultPath
 }
 
-func (*K8sPod) JoinPathVariable(paths ...string) string {
+func (*K8sJob) JoinPathVariable(paths ...string) string {
 	return strings.Join(paths, ":")
 }
 
-func (*K8sPod) ToContainerPath(path string) string {
+func (*K8sJob) ToContainerPath(path string) string {
 	return path
 }
 
-func (*K8sPod) IsEnvironmentCaseInsensitive() bool {
+func (*K8sJob) IsEnvironmentCaseInsensitive() bool {
 	return false
 }
 
-func (*K8sPod) GetRunnerContext(_ context.Context) map[string]any {
+func (*K8sJob) GetRunnerContext(_ context.Context) map[string]any {
 	return map[string]any{
 		"os":         "Linux",
 		"arch":       runnerArch(),
@@ -440,13 +540,13 @@ func (*K8sPod) GetRunnerContext(_ context.Context) map[string]any {
 	}
 }
 
-func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
+func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 	timeout := p.config.JobTimeout
 	if timeout <= 0 {
 		timeout = 3 * time.Hour
 	}
 
-	pod := &corev1.Pod{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "forgejo-runner-task-",
 			Namespace:    p.namespace,
@@ -456,28 +556,29 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 		},
 	}
 
-	maps.Copy(pod.Labels, p.extraLabels)
+	maps.Copy(job.Labels, p.extraLabels)
 
 	if p.config.PodSpec != "" {
 		data, err := os.ReadFile(p.config.PodSpec)
 		if err != nil {
 			return nil, fmt.Errorf("read podspec %q: %w", p.config.PodSpec, err)
 		}
-		if err := yaml.Unmarshal(data, &pod.Spec); err != nil {
+		var podSpec corev1.PodSpec
+		if err := yaml.Unmarshal(data, &podSpec); err != nil {
 			return nil, fmt.Errorf("parse podspec %q: %w", p.config.PodSpec, err)
 		}
+		job.Spec.Template.Spec = podSpec
 	}
 
-	mainIdx := p.findMainContainer(pod)
+	mainIdx := p.findMainContainer(&job.Spec.Template)
 	if mainIdx < 0 {
-		pod.Spec.Containers = append([]corev1.Container{{
+		job.Spec.Template.Spec.Containers = append([]corev1.Container{{
 			Name: k8sMainContainerName,
-		}}, pod.Spec.Containers...)
+		}}, job.Spec.Template.Spec.Containers...)
 		mainIdx = 0
 	}
 
-	// Work on a copy to avoid pointer invalidation when appending sidecars.
-	main := pod.Spec.Containers[mainIdx]
+	main := job.Spec.Template.Spec.Containers[mainIdx]
 
 	if p.input.Image != "" && p.input.Image != k8sPodSpecImageSentinel {
 		main.Image = p.input.Image
@@ -486,9 +587,7 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 		return nil, errors.New("no container image specified (set it in the podspec or workflow runs-on)")
 	}
 
-	// Replace the podspec command with a sleep — work runs via exec.
-	// WorkingDir is intentionally not set here; per-step workdir is applied in Exec.
-	main.Command = []string{"sh", "-c", fmt.Sprintf("mkdir -p %s && sleep %d", k8sWorkDir, int64(timeout.Seconds()))}
+	main.Command = []string{"sh", "-c", fmt.Sprintf("mkdir -p %s && sleep %d", k8sWorkDir, int64(timeout.Seconds())+10)}
 
 	for _, kv := range p.input.Env {
 		parts := strings.SplitN(kv, "=", 2)
@@ -497,7 +596,7 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 		}
 	}
 
-	p.ensureSharedVolume(pod, &main)
+	p.ensureSharedVolume(&job.Spec.Template, &main)
 
 	if len(p.capAdd) > 0 || len(p.capDrop) > 0 {
 		if main.SecurityContext == nil {
@@ -514,7 +613,7 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 		}
 	}
 
-	pod.Spec.Containers[mainIdx] = main
+	job.Spec.Template.Spec.Containers[mainIdx] = main
 
 	p.mu.Lock()
 	services := slices.Clone(p.services)
@@ -532,29 +631,37 @@ func (p *K8sPod) createPod(ctx context.Context) (*corev1.Pod, error) {
 				MountPath: k8sSharedMount,
 			}},
 		}
-		pod.Spec.Containers = append(pod.Spec.Containers, svcContainer)
+		job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, svcContainer)
 		hostAliases = append(hostAliases, svc.name)
 	}
 
 	if len(hostAliases) > 0 {
-		pod.Spec.HostAliases = append(pod.Spec.HostAliases, corev1.HostAlias{
+		job.Spec.Template.Spec.HostAliases = append(job.Spec.Template.Spec.HostAliases, corev1.HostAlias{
 			IP:        "127.0.0.1",
 			Hostnames: hostAliases,
 		})
 	}
 
-	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+	job.Spec.BackoffLimit = new(int32)
+	*job.Spec.BackoffLimit = 0
+	job.Spec.Completions = new(int32)
+	*job.Spec.Completions = 1
+	job.Spec.Parallelism = new(int32)
+	*job.Spec.Parallelism = 1
+	job.Spec.ActiveDeadlineSeconds = new(int64)
+	*job.Spec.ActiveDeadlineSeconds = int64(timeout.Seconds())
 
-	created, err := p.client.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
+	created, err := p.client.BatchV1().Jobs(p.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("k8s create pod: %w", err)
+		return nil, fmt.Errorf("k8s create job: %w", err)
 	}
-	p.pod = created
+	p.job = created
 	return created, nil
 }
 
-func (p *K8sPod) findMainContainer(pod *corev1.Pod) int {
-	for i, c := range pod.Spec.Containers {
+func (p *K8sJob) findMainContainer(podTemplate *corev1.PodTemplateSpec) int {
+	for i, c := range podTemplate.Spec.Containers {
 		if c.Name == k8sMainContainerName {
 			return i
 		}
@@ -562,18 +669,17 @@ func (p *K8sPod) findMainContainer(pod *corev1.Pod) int {
 	return -1
 }
 
-func (p *K8sPod) ensureSharedVolume(pod *corev1.Pod, main *corev1.Container) {
+func (p *K8sJob) ensureSharedVolume(podTemplate *corev1.PodTemplateSpec, main *corev1.Container) {
 	hasVolume := false
-	for _, v := range pod.Spec.Volumes {
+	for _, v := range podTemplate.Spec.Volumes {
 		if v.Name == "shared" {
 			hasVolume = true
 			break
 		}
 	}
 	if !hasVolume {
-		// Default 10Gi limit; override by defining a "shared" volume in the podspec.
 		sizeLimit := resource.MustParse("10Gi")
-		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
 			Name: "shared",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -598,7 +704,7 @@ func (p *K8sPod) ensureSharedVolume(pod *corev1.Pod, main *corev1.Container) {
 	}
 }
 
-func (p *K8sPod) waitForPodRunning(ctx context.Context, pod *corev1.Pod) error {
+func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error {
 	pollTimeout := p.config.PollTimeout
 	if pollTimeout == 0 {
 		pollTimeout = 10 * time.Minute
@@ -608,65 +714,64 @@ func (p *K8sPod) waitForPodRunning(ctx context.Context, pod *corev1.Pod) error {
 	defer cancel()
 
 	for {
-		// Get-then-Watch with ResourceVersion: covers the case where the
-		// transition happens between iterations and the watch would miss it.
-		current, err := p.client.CoreV1().Pods(p.namespace).Get(watchCtx, pod.Name, metav1.GetOptions{})
+		current, err := p.client.BatchV1().Jobs(p.namespace).Get(watchCtx, job.Name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return errors.New("pod was deleted while waiting for it to start")
+				return errors.New("job was deleted while waiting for it to start")
 			}
-			return fmt.Errorf("get pod status: %w", err)
+			return fmt.Errorf("get job status: %w", err)
 		}
-		if done, err := podPhaseTerminal(current); done {
+		if done, err := jobTerminal(current); done {
 			return err
 		}
 
-		watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
-			FieldSelector:   "metadata.name=" + pod.Name,
+		watcher, err := p.client.BatchV1().Jobs(p.namespace).Watch(watchCtx, metav1.ListOptions{
+			FieldSelector:   "metadata.name=" + job.Name,
 			ResourceVersion: current.ResourceVersion,
 		})
 		if err != nil {
-			return fmt.Errorf("watch pod: %w", err)
+			return fmt.Errorf("watch job: %w", err)
 		}
 
-		done, err := p.consumePodWatch(watcher)
+		done, err := p.consumeJobWatch(watcher)
 		watcher.Stop()
 		if done {
 			return err
 		}
 
 		if watchCtx.Err() != nil {
-			return errors.New("timeout waiting for pod to become ready")
+			return errors.New("timeout waiting for job to become ready")
 		}
-		slog.Debug("watch channel closed, retrying", "pod", pod.Name)
+		slog.Debug("watch channel closed, retrying", "job", job.Name)
 	}
 }
 
-// podPhaseTerminal reports whether the phase is decisive (Running/Failed/Succeeded).
-func podPhaseTerminal(pod *corev1.Pod) (bool, error) {
-	switch pod.Status.Phase {
-	case corev1.PodRunning:
+func jobTerminal(job *batchv1.Job) (bool, error) {
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			return true, fmt.Errorf("job failed: reason=%s message=%s", cond.Reason, cond.Message)
+		}
+	}
+	if job.Status.Active > 0 || job.Status.Succeeded > 0 {
 		return true, nil
-	case corev1.PodFailed:
-		return true, fmt.Errorf("pod failed: reason=%s message=%s", pod.Status.Reason, pod.Status.Message)
-	case corev1.PodSucceeded:
-		return true, errors.New("pod completed unexpectedly")
-	default:
-		return false, nil
 	}
+	if job.Status.Failed > 0 {
+		return true, errors.New("job failed")
+	}
+	return false, nil
 }
 
-func (p *K8sPod) consumePodWatch(watcher watch.Interface) (bool, error) {
+func (p *K8sJob) consumeJobWatch(watcher watch.Interface) (bool, error) {
 	for event := range watcher.ResultChan() {
 		switch event.Type {
 		case watch.Modified, watch.Added:
-			if eventPod, ok := event.Object.(*corev1.Pod); ok {
-				if done, err := podPhaseTerminal(eventPod); done {
+			if eventJob, ok := event.Object.(*batchv1.Job); ok {
+				if done, err := jobTerminal(eventJob); done {
 					return true, err
 				}
 			}
 		case watch.Deleted:
-			return true, errors.New("pod was deleted while waiting for it to start")
+			return true, errors.New("job was deleted while waiting for it to start")
 		case watch.Error:
 			if status, ok := event.Object.(*metav1.Status); ok {
 				return true, fmt.Errorf("watch error: %s", status.Message)
@@ -677,7 +782,7 @@ func (p *K8sPod) consumePodWatch(watcher watch.Interface) (bool, error) {
 	return false, nil
 }
 
-func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {
+func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) {
 	pollTimeout := p.config.PollTimeout
 	if pollTimeout == 0 {
 		pollTimeout = 10 * time.Minute
@@ -688,10 +793,10 @@ func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {
 
 	for {
 		watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
-			FieldSelector: "metadata.name=" + p.pod.Name,
+			LabelSelector: "batch.kubernetes.io/job-name=" + p.job.Name,
 		})
 		if err != nil {
-			return fmt.Errorf("watch pod for container readiness: %w", err)
+			return "", fmt.Errorf("watch pods for job container readiness: %w", err)
 		}
 
 		for event := range watcher.ResultChan() {
@@ -704,16 +809,56 @@ func (p *K8sPod) waitForAllContainersReady(ctx context.Context) error {
 			}
 			if podAllContainersReady(eventPod) {
 				watcher.Stop()
-				return nil
+				return eventPod.Name, nil
 			}
 		}
 		watcher.Stop()
 
 		if watchCtx.Err() != nil {
-			return fmt.Errorf("timeout waiting for all containers to become ready")
+			return "", fmt.Errorf("timeout waiting for all containers to become ready")
 		}
-		slog.Debug("watch channel closed, retrying", "pod", p.pod.Name)
+		slog.Debug("watch channel closed, retrying", "job", p.job.Name)
 	}
+}
+
+func (p *K8sJob) waitForExecReady(podName string) error {
+	if p.job == nil {
+		return errors.New("job not started")
+	}
+
+	pollTimeout := p.config.PollTimeout
+	if pollTimeout == 0 {
+		pollTimeout = 10 * time.Minute
+	}
+
+	deadline := time.Now().Add(pollTimeout)
+	slog.Info("waiting for exec to be ready", "job", p.job.Name, "pod", podName, "deadline", deadline)
+
+	for time.Now().Before(deadline) {
+		exec, err := p.newExecCommand(podName, &corev1.PodExecOptions{
+			Container: k8sMainContainerName,
+			Command:   []string{"echo", "ready"},
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    false,
+		})
+		if err != nil {
+			slog.Debug("exec setup failed, retrying", "error", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+			Stdout: io.Discard, Stderr: io.Discard,
+		})
+		if err != nil {
+			slog.Debug("exec probe failed, retrying", "error", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		slog.Info("exec probe succeeded", "job", p.job.Name, "pod", podName)
+		return nil
+	}
+	return fmt.Errorf("timeout waiting for container to accept exec after %v", pollTimeout)
 }
 
 func podAllContainersReady(pod *corev1.Pod) bool {
@@ -723,27 +868,75 @@ func podAllContainersReady(pod *corev1.Pod) bool {
 		}
 	}
 	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.Started != nil && *cs.Started && !cs.Ready {
+		// Init containers that have never started are not yet ready.
+		// Started==nil means the init container hasn't begun, Started==false
+		// means it's running but not ready yet.
+		if cs.Started == nil || !cs.Ready {
 			return false
 		}
 	}
 	return true
 }
 
-func (p *K8sPod) deletePod(ctx context.Context) error {
-	if p.pod == nil {
+func (p *K8sJob) deleteJob(ctx context.Context) error {
+	if p.job == nil {
 		return nil
 	}
+	if p.execCancel != nil {
+		p.execCancel()
+	}
+	if p.execGroup != nil {
+		_ = p.execGroup.Wait()
+	}
 	propagation := metav1.DeletePropagationForeground
-	err := p.client.CoreV1().Pods(p.namespace).Delete(ctx, p.pod.Name, metav1.DeleteOptions{
+	err := p.client.BatchV1().Jobs(p.namespace).Delete(ctx, p.job.Name, metav1.DeleteOptions{
 		PropagationPolicy:  &propagation,
 		GracePeriodSeconds: ptr.To[int64](30),
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete pod %q: %w", p.pod.Name, err)
+		return fmt.Errorf("delete job %q: %w", p.job.Name, err)
 	}
-	p.pod = nil
+	p.job = nil
 	return nil
+}
+
+func (p *K8sJob) getPodNameForJob(jobName string) (string, error) {
+	pods, err := p.client.CoreV1().Pods(p.namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
+	})
+	if err != nil {
+		return "", fmt.Errorf("list pods for job %q: %w", jobName, err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no pods found for job %q", jobName)
+	}
+
+	// Prefer a Running pod; fall back to the first available.
+	var running, first string
+	for _, pod := range pods.Items {
+		if first == "" {
+			first = pod.Name
+		}
+		if pod.Status.Phase == corev1.PodRunning {
+			running = pod.Name
+		}
+	}
+	if running != "" {
+		return running, nil
+	}
+	return first, nil
+}
+
+// isClosedStreamError reports whether err is a network error caused by the
+// container or its network being torn down mid-stream.
+func isClosedStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "read/write on closed pipe") ||
+		strings.Contains(s, "next reader")
 }
 
 // teeStderr always captures into errBuf so error messages can include stderr,
@@ -755,8 +948,8 @@ func teeStderr(errBuf *bytes.Buffer, extra io.Writer) io.Writer {
 	return io.MultiWriter(errBuf, extra)
 }
 
-func (p *K8sPod) mkdir(ctx context.Context, path string) error {
-	exec, err := p.newExecCommand(&corev1.PodExecOptions{
+func (p *K8sJob) mkdir(ctx context.Context, path string) error {
+	exec, err := p.newExecCommand(p.podName, &corev1.PodExecOptions{
 		Container: k8sMainContainerName,
 		Command:   []string{"mkdir", "-p", path},
 		Stderr:    true,
@@ -776,8 +969,8 @@ func (p *K8sPod) mkdir(ctx context.Context, path string) error {
 	return nil
 }
 
-func (p *K8sPod) execTarExtract(ctx context.Context, destPath string, input io.Reader) error {
-	exec, err := p.newExecCommand(&corev1.PodExecOptions{
+func (p *K8sJob) execTarExtract(ctx context.Context, destPath string, input io.Reader) error {
+	exec, err := p.newExecCommand(p.podName, &corev1.PodExecOptions{
 		Container: k8sMainContainerName,
 		Command:   []string{"tar", "xzf", "-", "-C", destPath},
 		Stdin:     true,
@@ -792,27 +985,29 @@ func (p *K8sPod) execTarExtract(ctx context.Context, destPath string, input io.R
 	p.mu.Unlock()
 
 	var errBuf bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+	if err := exec.StreamWithContext(p.execCtx, remotecommand.StreamOptions{
 		Stdin:  input,
 		Stderr: teeStderr(&errBuf, stderr),
-	}); err != nil {
+	}); err != nil && !isClosedStreamError(err) {
 		return fmt.Errorf("tar extract to %q: %w (stderr: %s)", destPath, err, strings.TrimSpace(errBuf.String()))
 	}
 	return nil
 }
 
-func (p *K8sPod) newExecCommand(opts *corev1.PodExecOptions) (remotecommand.Executor, error) {
-	if p.pod == nil {
-		return nil, errors.New("pod not started")
+func (p *K8sJob) newExecCommand(podName string, opts *corev1.PodExecOptions) (remotecommand.Executor, error) {
+	if p.client == nil {
+		return nil, errors.New("client not initialized")
 	}
+	slog.Debug("exec: pod info", "podName", podName, "namespace", p.namespace, "container", opts.Container)
 
 	req := p.client.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Name(p.pod.Name).
+		Name(podName).
 		Namespace(p.namespace).
 		SubResource("exec")
 	req.VersionedParams(opts, scheme.ParameterCodec)
 	url := req.URL()
+	slog.Debug("exec: URL", "url", url.String())
 
 	wsExec, err := remotecommand.NewWebSocketExecutor(p.restCfg, "GET", url.String())
 	if err != nil {
@@ -823,7 +1018,7 @@ func (p *K8sPod) newExecCommand(opts *corev1.PodExecOptions) (remotecommand.Exec
 		return nil, fmt.Errorf("create SPDY executor: %w", err)
 	}
 	exec, err := remotecommand.NewFallbackExecutor(wsExec, spdyExec, func(err error) bool {
-		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+		return true
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create fallback executor: %w", err)
