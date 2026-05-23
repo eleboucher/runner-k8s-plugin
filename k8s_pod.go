@@ -28,6 +28,7 @@ import (
 	metav1watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/tools/watch"
@@ -826,7 +827,22 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 			}
 			return "", err
 		}
-		return "", nil
+
+		// Watch ended without error - this means callback returned true (found ready)
+		// List the pod to get its name
+		pods, err := p.client.CoreV1().Pods(p.namespace).List(watchCtx, metav1.ListOptions{
+			LabelSelector: "batch.kubernetes.io/job-name=" + p.job.Name,
+		})
+		if err != nil {
+			return "", fmt.Errorf("list pods: %w", err)
+		}
+		for _, pod := range pods.Items {
+			if podAllContainersReady(&pod) {
+				return pod.Name, nil
+			}
+		}
+		// Watch ended but no ready pod found - retry
+		slog.Debug("watch ended without finding ready containers, retrying", "job", p.job.Name)
 	}
 }
 
@@ -840,16 +856,12 @@ func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 		pollTimeout = 10 * time.Minute
 	}
 
-	deadline := time.Now().Add(pollTimeout)
-	slog.Info("waiting for exec to be ready", "job", p.job.Name, "pod", podName, "deadline", deadline)
+	pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
+	defer cancel()
 
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+	slog.Info("waiting for exec to be ready", "job", p.job.Name, "pod", podName)
 
+	return wait.PollUntilContextCancel(pollCtx, 100*time.Millisecond, false, func(ctx context.Context) (done bool, err error) {
 		exec, err := p.newExecCommand(podName, &corev1.PodExecOptions{
 			Container: k8sMainContainerName,
 			Command:   []string{"echo", "ready"},
@@ -859,21 +871,18 @@ func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 		})
 		if err != nil {
 			slog.Debug("exec setup failed, retrying", "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
+			return false, nil
 		}
 		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: io.Discard, Stderr: io.Discard,
 		})
 		if err != nil {
 			slog.Debug("exec probe failed, retrying", "error", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
+			return false, nil
 		}
 		slog.Info("exec probe succeeded", "job", p.job.Name, "pod", podName)
-		return nil
-	}
-	return fmt.Errorf("timeout waiting for container to accept exec after %v", pollTimeout)
+		return true, nil
+	})
 }
 
 func podAllContainersReady(pod *corev1.Pod) bool {
