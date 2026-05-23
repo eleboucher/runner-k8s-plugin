@@ -25,10 +25,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
+	metav1watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/tools/watch"
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
@@ -120,7 +122,7 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 		}
 		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
 
-		if err := p.waitForJobRunning(ctx, job); err != nil {
+		if err := p.waitForJobRunning(ctx, job, nil); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
 				slog.Warn("failed to clean up job after startup failure", "error", delErr)
 			}
@@ -708,7 +710,7 @@ func (p *K8sJob) ensureSharedVolume(podTemplate *corev1.PodTemplateSpec, main *c
 	}
 }
 
-func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error {
+func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job, lw *cache.ListWatch) error {
 	pollTimeout := p.config.PollTimeout
 	if pollTimeout == 0 {
 		pollTimeout = 10 * time.Minute
@@ -729,24 +731,43 @@ func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error 
 			return err
 		}
 
-		watcher, err := p.client.BatchV1().Jobs(p.namespace).Watch(watchCtx, metav1.ListOptions{
-			FieldSelector:   "metadata.name=" + job.Name,
-			ResourceVersion: current.ResourceVersion,
-		})
+		var watcher metav1watch.Interface
+		if lw != nil {
+			watcher, err = lw.WatchWithContext(watchCtx, metav1.ListOptions{})
+		} else {
+			watcher, err = p.client.BatchV1().Jobs(p.namespace).Watch(watchCtx, metav1.ListOptions{
+				FieldSelector:   "metadata.name=" + job.Name,
+				ResourceVersion: current.ResourceVersion,
+			})
+		}
 		if err != nil {
 			return fmt.Errorf("watch job: %w", err)
 		}
 
-		done, err := p.consumeJobWatch(watcher)
-		watcher.Stop()
-		if done {
+		_, err = watch.UntilWithoutRetry(watchCtx, watcher, func(event metav1watch.Event) (bool, error) {
+			if event.Type == metav1watch.Deleted {
+				return true, errors.New("job was deleted while waiting for it to start")
+			}
+			job, ok := event.Object.(*batchv1.Job)
+			if !ok {
+				return false, nil
+			}
+			return jobTerminal(job)
+		})
+		if err != nil {
+			if errors.Is(err, watch.ErrWatchClosed) {
+				if watchCtx.Err() != nil {
+					return errors.New("timeout waiting for job to become ready")
+				}
+				slog.Debug("watch channel closed, retrying", "job", job.Name)
+				continue
+			}
+			if watchCtx.Err() != nil {
+				return errors.New("timeout waiting for job to become ready")
+			}
 			return err
 		}
-
-		if watchCtx.Err() != nil {
-			return errors.New("timeout waiting for job to become ready")
-		}
-		slog.Debug("watch channel closed, retrying", "job", job.Name)
+		return nil
 	}
 }
 
@@ -761,27 +782,6 @@ func jobTerminal(job *batchv1.Job) (bool, error) {
 	}
 	if job.Status.Failed > 0 {
 		return true, errors.New("job failed")
-	}
-	return false, nil
-}
-
-func (p *K8sJob) consumeJobWatch(watcher watch.Interface) (bool, error) {
-	for event := range watcher.ResultChan() {
-		switch event.Type {
-		case watch.Modified, watch.Added:
-			if eventJob, ok := event.Object.(*batchv1.Job); ok {
-				if done, err := jobTerminal(eventJob); done {
-					return true, err
-				}
-			}
-		case watch.Deleted:
-			return true, errors.New("job was deleted while waiting for it to start")
-		case watch.Error:
-			if status, ok := event.Object.(*metav1.Status); ok {
-				return true, fmt.Errorf("watch error: %s", status.Message)
-			}
-			return true, errors.New("unknown watch error")
-		}
 	}
 	return false, nil
 }
@@ -803,25 +803,30 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 			return "", fmt.Errorf("watch pods for job container readiness: %w", err)
 		}
 
-		for event := range watcher.ResultChan() {
-			if event.Type != watch.Modified && event.Type != watch.Added {
-				continue
-			}
-			eventPod, ok := event.Object.(*corev1.Pod)
+		_, err = watch.UntilWithoutRetry(watchCtx, watcher, func(event metav1watch.Event) (bool, error) {
+			pod, ok := event.Object.(*corev1.Pod)
 			if !ok {
+				return false, nil
+			}
+			if podAllContainersReady(pod) {
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			if errors.Is(err, watch.ErrWatchClosed) {
+				if watchCtx.Err() != nil {
+					return "", errors.New("timeout waiting for all containers to become ready")
+				}
+				slog.Debug("watch channel closed, retrying", "job", p.job.Name)
 				continue
 			}
-			if podAllContainersReady(eventPod) {
-				watcher.Stop()
-				return eventPod.Name, nil
+			if watchCtx.Err() != nil {
+				return "", errors.New("timeout waiting for all containers to become ready")
 			}
+			return "", err
 		}
-		watcher.Stop()
-
-		if watchCtx.Err() != nil {
-			return "", fmt.Errorf("timeout waiting for all containers to become ready")
-		}
-		slog.Debug("watch channel closed, retrying", "job", p.job.Name)
+		return "", nil
 	}
 }
 

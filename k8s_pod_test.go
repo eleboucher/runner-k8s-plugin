@@ -15,8 +15,10 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -45,6 +47,28 @@ func newTestK8sJob(t *testing.T, fakeClient *fake.Clientset) *K8sJob {
 		stderr: io.Discard,
 	}
 	return p
+}
+
+func newTestListWatchForJobs(c *fake.Clientset, namespace, jobName string) *cache.ListWatch {
+	return &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.BatchV1().Jobs(namespace).List(context.Background(), options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.BatchV1().Jobs(namespace).Watch(context.Background(), options)
+		},
+	}
+}
+
+func newTestListWatchForPods(c *fake.Clientset, namespace, jobName string) *cache.ListWatch {
+	return &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.CoreV1().Pods(namespace).List(context.Background(), options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.CoreV1().Pods(namespace).Watch(context.Background(), options)
+		},
+	}
 }
 
 func TestK8sJob_CreateJob_DefaultSpec(t *testing.T) {
@@ -236,6 +260,7 @@ func TestK8sJob_WaitForJobRunning(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
+	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Modify(&batchv1.Job{
@@ -244,7 +269,7 @@ func TestK8sJob_WaitForJobRunning(t *testing.T) {
 		})
 	}()
 
-	require.NoError(t, p.waitForJobRunning(t.Context(), job))
+	require.NoError(t, p.waitForJobRunning(t.Context(), job, lw))
 }
 
 func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
@@ -257,6 +282,7 @@ func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
+	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Modify(&batchv1.Job{
@@ -272,7 +298,7 @@ func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
 		})
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job)
+	err := p.waitForJobRunning(t.Context(), job, lw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "job failed")
 	assert.Contains(t, err.Error(), "OOMKilled")
@@ -288,12 +314,13 @@ func TestK8sJob_WaitForJobRunning_JobDeleted(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
+	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Delete(&batchv1.Job{ObjectMeta: job.ObjectMeta})
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job)
+	err := p.waitForJobRunning(t.Context(), job, lw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deleted")
 }
@@ -309,13 +336,14 @@ func TestK8sJob_WaitForJobRunning_Timeout(t *testing.T) {
 
 	p := newTestK8sJob(t, fakeClient)
 	p.config.PollTimeout = 100 * time.Millisecond
+	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		fakeWatcher.Stop()
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job)
+	err := p.waitForJobRunning(t.Context(), job, lw)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timeout")
 }
@@ -327,7 +355,8 @@ func TestK8sJob_WaitForJobRunning_AlreadyRunningOnGet(t *testing.T) {
 	}
 	fakeClient := fake.NewSimpleClientset(job)
 	p := newTestK8sJob(t, fakeClient)
-	require.NoError(t, p.waitForJobRunning(t.Context(), job))
+	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
+	require.NoError(t, p.waitForJobRunning(t.Context(), job, lw))
 }
 
 func TestK8sJob_DeleteJob(t *testing.T) {
