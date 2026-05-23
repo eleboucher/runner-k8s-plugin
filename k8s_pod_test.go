@@ -260,7 +260,6 @@ func TestK8sJob_WaitForJobRunning(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
-	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Modify(&batchv1.Job{
@@ -269,7 +268,7 @@ func TestK8sJob_WaitForJobRunning(t *testing.T) {
 		})
 	}()
 
-	require.NoError(t, p.waitForJobRunning(t.Context(), job, lw))
+	require.NoError(t, p.waitForJobRunning(t.Context(), job))
 }
 
 func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
@@ -282,7 +281,6 @@ func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
-	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Modify(&batchv1.Job{
@@ -298,7 +296,7 @@ func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
 		})
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job, lw)
+	err := p.waitForJobRunning(t.Context(), job)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "job failed")
 	assert.Contains(t, err.Error(), "OOMKilled")
@@ -314,13 +312,12 @@ func TestK8sJob_WaitForJobRunning_JobDeleted(t *testing.T) {
 	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
 
 	p := newTestK8sJob(t, fakeClient)
-	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		watcher.Delete(&batchv1.Job{ObjectMeta: job.ObjectMeta})
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job, lw)
+	err := p.waitForJobRunning(t.Context(), job)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deleted")
 }
@@ -336,14 +333,13 @@ func TestK8sJob_WaitForJobRunning_Timeout(t *testing.T) {
 
 	p := newTestK8sJob(t, fakeClient)
 	p.config.PollTimeout = 100 * time.Millisecond
-	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
 
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		fakeWatcher.Stop()
 	}()
 
-	err := p.waitForJobRunning(t.Context(), job, lw)
+	err := p.waitForJobRunning(t.Context(), job)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timeout")
 }
@@ -355,8 +351,7 @@ func TestK8sJob_WaitForJobRunning_AlreadyRunningOnGet(t *testing.T) {
 	}
 	fakeClient := fake.NewSimpleClientset(job)
 	p := newTestK8sJob(t, fakeClient)
-	lw := newTestListWatchForJobs(fakeClient, "test-ns", job.Name)
-	require.NoError(t, p.waitForJobRunning(t.Context(), job, lw))
+	require.NoError(t, p.waitForJobRunning(t.Context(), job))
 }
 
 func TestK8sJob_DeleteJob(t *testing.T) {
@@ -507,7 +502,7 @@ func TestJobTerminal(t *testing.T) {
 					Succeeded: tc.succeeded,
 				},
 			}
-			done, err := jobTerminal(job)
+			done, err := jobStartedOrTerminal(job)
 			assert.Equal(t, tc.done, done)
 			if tc.errMatch == "" {
 				assert.NoError(t, err)

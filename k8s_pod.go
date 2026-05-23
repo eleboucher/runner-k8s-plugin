@@ -25,10 +25,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	metav1watch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/tools/watch"
@@ -68,11 +69,9 @@ type K8sJob struct {
 	capDrop     []string
 	extraLabels map[string]string
 
-	mu         sync.Mutex
-	stdout     io.Writer
-	stderr     io.Writer
-	execCtx    context.Context
-	execCancel context.CancelFunc
+	mu     sync.Mutex
+	stdout io.Writer
+	stderr io.Writer
 }
 
 func (p *K8sJob) AddServiceContainerRaw(name, image string, env map[string]string, ports []string) {
@@ -123,7 +122,14 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 		}
 		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
 
-		if err := p.waitForJobRunning(ctx, job, nil); err != nil {
+		pollTimeout := p.config.PollTimeout
+		if pollTimeout == 0 {
+			pollTimeout = 10 * time.Minute
+		}
+		startCtx, cancel := context.WithDeadline(ctx, time.Now().Add(pollTimeout))
+		defer cancel()
+
+		if err := p.waitForJobRunning(startCtx, job); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
 				slog.Warn("failed to clean up job after startup failure", "error", delErr)
 			}
@@ -132,7 +138,7 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 
 		slog.Info("job is running", "name", job.Name)
 
-		podName, err := p.waitForAllContainersReady(ctx)
+		podName, err := p.waitForAllContainersReady(startCtx)
 		if err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
 				slog.Warn("failed to clean up job after containers ready failure", "error", delErr)
@@ -141,7 +147,7 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 		}
 		slog.Info("all containers ready", "name", job.Name)
 
-		if err := p.waitForExecReady(ctx, podName); err != nil {
+		if err := p.waitForExecReady(startCtx, podName); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
 				slog.Warn("failed to clean up job after exec ready failure", "error", delErr)
 			}
@@ -150,7 +156,6 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 		slog.Debug("exec ready", "name", job.Name)
 
 		p.podName = podName
-		p.execCtx, p.execCancel = context.WithCancel(context.Background())
 
 		return nil
 	}
@@ -711,59 +716,64 @@ func (p *K8sJob) ensureSharedVolume(podTemplate *corev1.PodTemplateSpec, main *c
 	}
 }
 
-func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job, lw *cache.ListWatch) error {
-	pollTimeout := p.config.PollTimeout
-	if pollTimeout == 0 {
-		pollTimeout = 10 * time.Minute
+func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error {
+	// Use deadline from context if set, otherwise use PollTimeout
+	if _, ok := ctx.Deadline(); !ok {
+		pollTimeout := p.config.PollTimeout
+		if pollTimeout == 0 {
+			pollTimeout = 10 * time.Minute
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pollTimeout)
+		defer cancel()
 	}
 
-	watchCtx, cancel := context.WithTimeout(ctx, pollTimeout)
-	defer cancel()
-
 	for {
-		current, err := p.client.BatchV1().Jobs(p.namespace).Get(watchCtx, job.Name, metav1.GetOptions{})
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		current, err := p.client.BatchV1().Jobs(p.namespace).Get(ctx, job.Name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return errors.New("job was deleted while waiting for it to start")
 			}
 			return fmt.Errorf("get job status: %w", err)
 		}
-		if done, err := jobTerminal(current); done {
+		if done, err := jobStartedOrTerminal(current); done {
 			return err
 		}
 
-		var watcher metav1watch.Interface
-		if lw != nil {
-			watcher, err = lw.WatchWithContext(watchCtx, metav1.ListOptions{})
-		} else {
-			watcher, err = p.client.BatchV1().Jobs(p.namespace).Watch(watchCtx, metav1.ListOptions{
-				FieldSelector:   "metadata.name=" + job.Name,
-				ResourceVersion: current.ResourceVersion,
-			})
-		}
+		watcher, err := p.client.BatchV1().Jobs(p.namespace).Watch(ctx, metav1.ListOptions{
+			FieldSelector:   "metadata.name=" + job.Name,
+			ResourceVersion: current.ResourceVersion,
+		})
 		if err != nil {
 			return fmt.Errorf("watch job: %w", err)
 		}
+		defer watcher.Stop()
 
-		_, err = watch.UntilWithoutRetry(watchCtx, watcher, func(event metav1watch.Event) (bool, error) {
+		_, err = watch.UntilWithoutRetry(ctx, watcher, func(event metav1watch.Event) (bool, error) {
 			if event.Type == metav1watch.Deleted {
 				return true, errors.New("job was deleted while waiting for it to start")
 			}
-			job, ok := event.Object.(*batchv1.Job)
+			watchedJob, ok := event.Object.(*batchv1.Job)
 			if !ok {
 				return false, nil
 			}
-			return jobTerminal(job)
+			return jobStartedOrTerminal(watchedJob)
 		})
 		if err != nil {
 			if errors.Is(err, watch.ErrWatchClosed) {
-				if watchCtx.Err() != nil {
+				if ctx.Err() != nil {
 					return errors.New("timeout waiting for job to become ready")
 				}
 				slog.Debug("watch channel closed, retrying", "job", job.Name)
 				continue
 			}
-			if watchCtx.Err() != nil {
+			if ctx.Err() != nil {
 				return errors.New("timeout waiting for job to become ready")
 			}
 			return err
@@ -772,7 +782,7 @@ func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job, lw *ca
 	}
 }
 
-func jobTerminal(job *batchv1.Job) (bool, error) {
+func jobStartedOrTerminal(job *batchv1.Job) (bool, error) {
 	for _, cond := range job.Status.Conditions {
 		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
 			return true, fmt.Errorf("job failed: reason=%s message=%s", cond.Reason, cond.Message)
@@ -788,62 +798,46 @@ func jobTerminal(job *batchv1.Job) (bool, error) {
 }
 
 func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) {
-	pollTimeout := p.config.PollTimeout
-	if pollTimeout == 0 {
-		pollTimeout = 10 * time.Minute
+	if _, ok := ctx.Deadline(); !ok {
+		pollTimeout := p.config.PollTimeout
+		if pollTimeout == 0 {
+			pollTimeout = 10 * time.Minute
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pollTimeout)
+		defer cancel()
 	}
 
-	watchCtx, cancel := context.WithTimeout(ctx, pollTimeout)
-	defer cancel()
-
-	for {
-		watcher, err := p.client.CoreV1().Pods(p.namespace).Watch(watchCtx, metav1.ListOptions{
-			LabelSelector: "batch.kubernetes.io/job-name=" + p.job.Name,
-		})
-		if err != nil {
-			return "", fmt.Errorf("watch pods for job container readiness: %w", err)
+	lw := &cache.ListWatch{
+		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
+			return p.client.CoreV1().Pods(p.namespace).List(ctx, opts)
+		},
+		WatchFunc: func(opts metav1.ListOptions) (metav1watch.Interface, error) {
+			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
+			return p.client.CoreV1().Pods(p.namespace).Watch(ctx, opts)
+		},
+	}
+	ev, err := watch.UntilWithSync(ctx, lw, &corev1.Pod{}, nil, func(event metav1watch.Event) (bool, error) {
+		if event.Type == metav1watch.Deleted {
+			return true, errors.New("pod was deleted while waiting for containers to be ready")
 		}
-
-		_, err = watch.UntilWithoutRetry(watchCtx, watcher, func(event metav1watch.Event) (bool, error) {
-			pod, ok := event.Object.(*corev1.Pod)
-			if !ok {
-				return false, nil
-			}
-			if podAllContainersReady(pod) {
-				return true, nil
-			}
+		pod, ok := event.Object.(*corev1.Pod)
+		if !ok {
 			return false, nil
-		})
-		if err != nil {
-			if errors.Is(err, watch.ErrWatchClosed) {
-				if watchCtx.Err() != nil {
-					return "", errors.New("timeout waiting for all containers to become ready")
-				}
-				slog.Debug("watch channel closed, retrying", "job", p.job.Name)
-				continue
-			}
-			if watchCtx.Err() != nil {
-				return "", errors.New("timeout waiting for all containers to become ready")
-			}
-			return "", err
 		}
-
-		// Watch ended without error - this means callback returned true (found ready)
-		// List the pod to get its name
-		pods, err := p.client.CoreV1().Pods(p.namespace).List(watchCtx, metav1.ListOptions{
-			LabelSelector: "batch.kubernetes.io/job-name=" + p.job.Name,
-		})
-		if err != nil {
-			return "", fmt.Errorf("list pods: %w", err)
-		}
-		for _, pod := range pods.Items {
-			if podAllContainersReady(&pod) {
-				return pod.Name, nil
-			}
-		}
-		// Watch ended but no ready pod found - retry
-		slog.Debug("watch ended without finding ready containers, retrying", "job", p.job.Name)
+		return podCondition(pod)
+	})
+	if wait.Interrupted(err) {
+		return "", errors.New("timeout waiting for all containers to become ready")
 	}
+	if err != nil {
+		return "", err
+	}
+	if ev == nil {
+		return "", errors.New("watch ended without finding ready containers")
+	}
+	return ev.Object.(*corev1.Pod).Name, nil
 }
 
 func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
@@ -851,17 +845,10 @@ func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 		return errors.New("job not started")
 	}
 
-	pollTimeout := p.config.PollTimeout
-	if pollTimeout == 0 {
-		pollTimeout = 10 * time.Minute
-	}
-
-	pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
-	defer cancel()
-
 	slog.Info("waiting for exec to be ready", "job", p.job.Name, "pod", podName)
 
-	return wait.PollUntilContextCancel(pollCtx, 100*time.Millisecond, false, func(ctx context.Context) (done bool, err error) {
+	start := time.Now()
+	err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(ctx context.Context) (done bool, err error) {
 		exec, err := p.newExecCommand(podName, &corev1.PodExecOptions{
 			Container: k8sMainContainerName,
 			Command:   []string{"echo", "ready"},
@@ -883,31 +870,65 @@ func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 		slog.Info("exec probe succeeded", "job", p.job.Name, "pod", podName)
 		return true, nil
 	})
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("timeout waiting for container to accept exec after %v", time.Since(start))
+	}
+	return err
 }
 
-func podAllContainersReady(pod *corev1.Pod) bool {
+func podCondition(pod *corev1.Pod) (bool, error) {
+	// Check for container failures
 	for _, cs := range pod.Status.ContainerStatuses {
-		if !cs.Ready {
-			return false
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
+				"CreateContainerConfigError", "InvalidImageName":
+				return false, fmt.Errorf("container %s: %s: %s", cs.Name, w.Reason, w.Message)
+			}
 		}
 	}
 	for _, cs := range pod.Status.InitContainerStatuses {
-		// Init containers that have never started are not yet ready.
-		// Started==nil means the init container hasn't begun, Started==false
-		// means it's running but not ready yet.
-		if cs.Started == nil || !cs.Ready {
-			return false
+		if cs.Started != nil && !*cs.Started {
+			// Init container started but failed
+			if w := cs.State.Waiting; w != nil {
+				switch w.Reason {
+				case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
+					"CreateContainerConfigError", "InvalidImageName":
+					return false, fmt.Errorf("init container %s: %s: %s", cs.Name, w.Reason, w.Message)
+				}
+			}
+		}
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
+				"CreateContainerConfigError", "InvalidImageName":
+				return false, fmt.Errorf("init container %s: %s: %s", cs.Name, w.Reason, w.Message)
+			}
 		}
 	}
-	return true
+
+	// Check if pod has failed
+	if pod.Status.Phase == corev1.PodFailed {
+		return false, fmt.Errorf("pod failed: %s", pod.Status.Message)
+	}
+
+	// Check all containers are ready
+	for _, cs := range pod.Status.ContainerStatuses {
+		if !cs.Ready {
+			return false, nil
+		}
+	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.Started == nil || !cs.Ready {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (p *K8sJob) deleteJob(ctx context.Context) error {
 	if p.job == nil {
 		return nil
-	}
-	if p.execCancel != nil {
-		p.execCancel()
 	}
 	propagation := metav1.DeletePropagationForeground
 	err := p.client.BatchV1().Jobs(p.namespace).Delete(ctx, p.job.Name, metav1.DeleteOptions{
