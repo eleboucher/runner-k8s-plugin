@@ -8,33 +8,33 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestK8sServer_Shutdown_CleansUpPods(t *testing.T) {
+func TestK8sServer_Shutdown_CleansUpJobs(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset()
 	s := &k8sServer{
 		pluginInstanceID: "test-instance",
 		envs:             make(map[string]*k8sEnvironment),
 	}
 
-	for _, name := range []string{"pod-1", "pod-2"} {
-		pod := &corev1.Pod{
+	for _, name := range []string{"job-1", "job-2"} {
+		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "test-ns"},
 		}
-		_, err := fakeClient.CoreV1().Pods("test-ns").Create(t.Context(), pod, metav1.CreateOptions{})
+		_, err := fakeClient.BatchV1().Jobs("test-ns").Create(t.Context(), job, metav1.CreateOptions{})
 		require.NoError(t, err)
 
 		s.envs[name] = &k8sEnvironment{
-			pod: &K8sPod{
+			job: &K8sJob{
 				client:    fakeClient,
 				namespace: "test-ns",
-				pod:       pod,
+				job:       job,
 				stdout:    io.Discard,
 				stderr:    io.Discard,
-				config:    &K8sPodConfig{Namespace: "test-ns"},
+				config:    &K8sJobConfig{Namespace: "test-ns"},
 			},
 		}
 	}
@@ -47,9 +47,9 @@ func TestK8sServer_Shutdown_CleansUpPods(t *testing.T) {
 
 	assert.Empty(t, s.envs)
 
-	pods, err := fakeClient.CoreV1().Pods("test-ns").List(t.Context(), metav1.ListOptions{})
+	jobs, err := fakeClient.BatchV1().Jobs("test-ns").List(t.Context(), metav1.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, pods.Items)
+	assert.Empty(t, jobs.Items)
 }
 
 func TestK8sServer_Shutdown_NoEnvironments(t *testing.T) {

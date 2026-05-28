@@ -15,9 +15,9 @@ const (
 	k8sDefaultPath       = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
-func NewK8sPod(input *container.NewContainerInput, config *K8sPodConfig) (*K8sPod, error) {
+func NewK8sJob(input *container.NewContainerInput, config *K8sJobConfig) (*K8sJob, error) {
 	if config == nil {
-		return nil, fmt.Errorf("K8sPodConfig is required")
+		return nil, fmt.Errorf("K8sJobConfig is required")
 	}
 
 	client, restCfg, err := GetK8sClient(config.KubeConfig)
@@ -30,7 +30,7 @@ func NewK8sPod(input *container.NewContainerInput, config *K8sPodConfig) (*K8sPo
 		ns = "default"
 	}
 
-	p := &K8sPod{
+	p := &K8sJob{
 		client:    client,
 		restCfg:   restCfg,
 		namespace: ns,

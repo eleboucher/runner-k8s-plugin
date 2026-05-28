@@ -58,8 +58,8 @@ func runnerArch() string {
 }
 
 type k8sEnvironment struct {
-	pod    *K8sPod
-	config *K8sPodConfig
+	job    *K8sJob
+	config *K8sJobConfig
 }
 
 type k8sServer struct {
@@ -92,7 +92,7 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 
 func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequest) (*pluginv1.CapabilitiesResponse, error) {
 	return &pluginv1.CapabilitiesResponse{
-		Name:                       "k8spod",
+		Name:                       "k8sjob",
 		RootPath:                   k8sSharedMount,
 		ActPath:                    k8sActPath,
 		ToolCachePath:              k8sToolCache,
@@ -148,7 +148,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		podSpec = opts["podspec"]
 	}
 
-	k8sCfg := &K8sPodConfig{
+	k8sCfg := &K8sJobConfig{
 		Namespace:   namespace,
 		PodSpec:     podSpec,
 		KubeConfig:  opts["kubeconfig"],
@@ -158,7 +158,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 
 	logWriter := &grpcLogWriter{}
 
-	pod, err := NewK8sPod(&container.NewContainerInput{
+	job, err := NewK8sJob(&container.NewContainerInput{
 		Image:      req.GetImage(),
 		Name:       req.GetName(),
 		Env:        req.GetEnv(),
@@ -167,7 +167,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		Stderr:     logWriter,
 	}, k8sCfg)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "create k8s pod: %v", err)
+		return nil, status.Errorf(codes.Internal, "create k8s job: %v", err)
 	}
 
 	envID := uuid.New().String()
@@ -175,20 +175,20 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	labels := parseLabels(opts["labels"], envID)
 	labels["forgejo-runner/environment-id"] = envID
 	labels["forgejo-runner/plugin-instance"] = s.pluginInstanceID
-	pod.extraLabels = labels
+	job.extraLabels = labels
 
 	// Add service containers
 	for _, svc := range req.GetServices() {
-		pod.AddServiceContainerRaw(svc.GetName(), svc.GetImage(), svc.GetEnv(), svc.GetPorts())
+		job.AddServiceContainerRaw(svc.GetName(), svc.GetImage(), svc.GetEnv(), svc.GetPorts())
 	}
 
 	// Execute Create (stores capAdd/capDrop)
-	if err := pod.Create(req.GetCapAdd(), req.GetCapDrop())(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "pod create: %v", err)
+	if err := job.Create(req.GetCapAdd(), req.GetCapDrop())(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "job create: %v", err)
 	}
 
 	s.mu.Lock()
-	s.envs[envID] = &k8sEnvironment{pod: pod, config: k8sCfg}
+	s.envs[envID] = &k8sEnvironment{job: job, config: k8sCfg}
 	s.mu.Unlock()
 
 	slog.Info("created environment", "id", envID, "image", req.GetImage(), "namespace", namespace)
@@ -201,8 +201,8 @@ func (s *k8sServer) Start(ctx context.Context, req *pluginv1.StartRequest) (*plu
 		return nil, err
 	}
 
-	if err := env.pod.Start(false)(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "pod start: %v", err)
+	if err := env.job.Start(false)(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "job start: %v", err)
 	}
 
 	imageEnv := s.readContainerEnv(ctx, env)
@@ -212,10 +212,10 @@ func (s *k8sServer) Start(ctx context.Context, req *pluginv1.StartRequest) (*plu
 
 func (s *k8sServer) readContainerEnv(ctx context.Context, env *k8sEnvironment) map[string]string {
 	var buf bytes.Buffer
-	oldOut, oldErr := env.pod.ReplaceLogWriter(&buf, io.Discard)
-	defer env.pod.ReplaceLogWriter(oldOut, oldErr)
+	oldOut, oldErr := env.job.ReplaceLogWriter(&buf, io.Discard)
+	defer env.job.ReplaceLogWriter(oldOut, oldErr)
 
-	if err := env.pod.Exec([]string{"env", "-0"}, nil, "", "")(ctx); err != nil {
+	if err := env.job.Exec([]string{"env", "-0"}, nil, "", "")(ctx); err != nil {
 		slog.Warn("failed to read container env", "error", err)
 		return nil
 	}
@@ -239,10 +239,10 @@ func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingS
 	stdoutW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDOUT}
 	stderrW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDERR}
 
-	oldOut, oldErr := env.pod.ReplaceLogWriter(stdoutW, stderrW)
-	defer env.pod.ReplaceLogWriter(oldOut, oldErr)
+	oldOut, oldErr := env.job.ReplaceLogWriter(stdoutW, stderrW)
+	defer env.job.ReplaceLogWriter(oldOut, oldErr)
 
-	execErr := env.pod.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
+	execErr := env.job.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
 
 	exitCode := int32(0)
 	errorMsg := ""
@@ -305,7 +305,7 @@ func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChun
 		}
 	}()
 
-	if err := env.pod.CopyTarStream(stream.Context(), destPath, pr); err != nil {
+	if err := env.job.CopyTarStream(stream.Context(), destPath, pr); err != nil {
 		return status.Errorf(codes.Internal, "copyin: %v", err)
 	}
 
@@ -318,7 +318,7 @@ func (s *k8sServer) CopyLocal(ctx context.Context, req *pluginv1.CopyLocalReques
 		return nil, err
 	}
 
-	if err := env.pod.CopyDir(req.GetDestPath(), req.GetSrcPath(), false)(ctx); err != nil {
+	if err := env.job.CopyDir(req.GetDestPath(), req.GetSrcPath(), false)(ctx); err != nil {
 		return nil, status.Errorf(codes.Internal, "copylocal: %v", err)
 	}
 
@@ -331,7 +331,7 @@ func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStre
 		return err
 	}
 
-	rc, err := env.pod.GetContainerArchive(stream.Context(), req.GetSrcPath())
+	rc, err := env.job.GetContainerArchive(stream.Context(), req.GetSrcPath())
 	if err != nil {
 		return status.Errorf(codes.Internal, "copyout: %v", err)
 	}
@@ -365,7 +365,7 @@ func (s *k8sServer) UpdateEnv(ctx context.Context, req *pluginv1.UpdateEnvReques
 	if current == nil {
 		current = make(map[string]string)
 	}
-	if err := env.pod.UpdateFromEnv(req.GetSrcPath(), &current)(ctx); err != nil {
+	if err := env.job.UpdateFromEnv(req.GetSrcPath(), &current)(ctx); err != nil {
 		return nil, status.Errorf(codes.Internal, "updateenv: %v", err)
 	}
 
@@ -378,7 +378,7 @@ func (s *k8sServer) IsHealthy(ctx context.Context, req *pluginv1.IsHealthyReques
 		return nil, err
 	}
 
-	wait, err := env.pod.IsHealthy(ctx)
+	wait, err := env.job.IsHealthy(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "ishealthy: %v", err)
 	}
@@ -393,10 +393,10 @@ func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*p
 		return nil, err
 	}
 
-	if err := env.pod.Remove()(ctx); err != nil {
+	if err := env.job.Remove()(ctx); err != nil {
 		slog.Warn("failed to remove environment", "id", envID, "error", err)
 	}
-	_ = env.pod.Close()(ctx)
+	_ = env.job.Close()(ctx)
 
 	s.mu.Lock()
 	delete(s.envs, envID)
@@ -429,7 +429,7 @@ func (s *k8sServer) Shutdown(ctx context.Context) error {
 
 	for id, env := range snapshot {
 		go func() {
-			results <- result{id: id, err: env.pod.Remove()(ctx)}
+			results <- result{id: id, err: env.job.Remove()(ctx)}
 		}()
 	}
 
