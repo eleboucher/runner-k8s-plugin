@@ -18,8 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/cache"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 )
 
 var (
@@ -481,12 +481,12 @@ func TestK8sJob_AddServiceContainerRaw_PortVariants(t *testing.T) {
 
 func TestJobTerminal(t *testing.T) {
 	cases := []struct {
-		name     string
-		active   int32
-		failed   int32
+		name      string
+		active    int32
+		failed    int32
 		succeeded int32
-		done     bool
-		errMatch string
+		done      bool
+		errMatch  string
 	}{
 		{"active", 1, 0, 0, true, ""},
 		{"failed", 0, 1, 0, true, "job failed"},
@@ -603,7 +603,6 @@ func TestK8sJob_Start_CleansUpOnWaitFailure(t *testing.T) {
 	require.NoError(t, listErr)
 	assert.Empty(t, jobs.Items)
 }
-
 
 func TestK8sJob_Create_StoresCapabilities(t *testing.T) {
 	p := &K8sJob{}
@@ -839,7 +838,7 @@ func TestSpillWriter_PartialSpill(t *testing.T) {
 }
 
 func TestTempFileReader_CloseRemovesFile(t *testing.T) {
-	tmp, err := os.CreateTemp("", "test-archive-*.tar")
+	tmp, err := os.CreateTemp(t.TempDir(), "test-archive-*.tar")
 	require.NoError(t, err)
 	path := tmp.Name()
 	_, err = tmp.Write([]byte("test data"))
@@ -857,7 +856,7 @@ func TestTempFileReader_CloseRemovesFile(t *testing.T) {
 }
 
 func TestTempFileReader_CloseReturnsReadError(t *testing.T) {
-	tmp, err := os.CreateTemp("", "test-archive-*.tar")
+	tmp, err := os.CreateTemp(t.TempDir(), "test-archive-*.tar")
 	require.NoError(t, err)
 	_, err = tmp.Write([]byte("test data"))
 	require.NoError(t, err)
