@@ -558,17 +558,18 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 		timeout = 3 * time.Hour
 	}
 
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "forgejo-runner",
+	}
+	maps.Copy(labels, p.extraLabels)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "forgejo-runner-task-",
 			Namespace:    p.namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "forgejo-runner",
-			},
+			Labels:       labels,
 		},
 	}
-
-	maps.Copy(job.Labels, p.extraLabels)
 
 	if p.config.PodSpec != "" {
 		data, err := os.ReadFile(p.config.PodSpec)
@@ -581,6 +582,13 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 		}
 		job.Spec.Template.Spec = podSpec
 	}
+
+	// Pods don't inherit job labels; copy them so selectors like
+	// topologySpreadConstraints can match.
+	if job.Spec.Template.Labels == nil {
+		job.Spec.Template.Labels = make(map[string]string, len(labels))
+	}
+	maps.Copy(job.Spec.Template.Labels, labels)
 
 	mainIdx := p.findMainContainer(&job.Spec.Template)
 	if mainIdx < 0 {

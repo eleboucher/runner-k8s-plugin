@@ -769,6 +769,11 @@ func TestK8sJob_CreateJob_ExtraLabels(t *testing.T) {
 	assert.Equal(t, "forgejo-runner", job.Labels["app.kubernetes.io/managed-by"])
 	assert.Equal(t, "test-env-123", job.Labels["forgejo-runner/environment-id"])
 	assert.Equal(t, "test-instance-456", job.Labels["forgejo-runner/plugin-instance"])
+
+	podLabels := job.Spec.Template.Labels
+	assert.Equal(t, "forgejo-runner", podLabels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "test-env-123", podLabels["forgejo-runner/environment-id"])
+	assert.Equal(t, "test-instance-456", podLabels["forgejo-runner/plugin-instance"])
 }
 
 type testWriter struct{}
