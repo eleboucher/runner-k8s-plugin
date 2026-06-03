@@ -49,28 +49,6 @@ func newTestK8sJob(t *testing.T, fakeClient *fake.Clientset) *K8sJob {
 	return p
 }
 
-func newTestListWatchForJobs(c *fake.Clientset, namespace, jobName string) *cache.ListWatch {
-	return &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-			return c.BatchV1().Jobs(namespace).List(context.Background(), options)
-		},
-		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			return c.BatchV1().Jobs(namespace).Watch(context.Background(), options)
-		},
-	}
-}
-
-func newTestListWatchForPods(c *fake.Clientset, namespace, jobName string) *cache.ListWatch {
-	return &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-			return c.CoreV1().Pods(namespace).List(context.Background(), options)
-		},
-		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-			return c.CoreV1().Pods(namespace).Watch(context.Background(), options)
-		},
-	}
-}
-
 func TestK8sJob_CreateJob_DefaultSpec(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset()
 	p := newTestK8sJob(t, fakeClient)
