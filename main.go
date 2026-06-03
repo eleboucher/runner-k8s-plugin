@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 )
 
@@ -30,6 +31,10 @@ func main() {
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(recoveryUnary()),
 		grpc.ChainStreamInterceptor(recoveryStream()),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             15 * time.Second,
+			PermitWithoutStream: true,
+		}),
 	)
 
 	k8sSrv := newK8sServer()
