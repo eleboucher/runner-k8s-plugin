@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
+	corev1 "k8s.io/api/core/v1"
 	k8sexec "k8s.io/client-go/util/exec"
 )
 
@@ -39,6 +40,17 @@ func parseLabels(raw, envID string) map[string]string {
 		labels[k] = strings.ReplaceAll(strings.TrimSpace(v), "${ENV_ID}", envID)
 	}
 	return labels
+}
+
+// parsePullPolicy validates the image_pull_policy backend option.
+func parsePullPolicy(raw string) (corev1.PullPolicy, error) {
+	switch p := corev1.PullPolicy(raw); p {
+	case "", corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+		return p, nil
+	default:
+		return "", fmt.Errorf("invalid image_pull_policy %q (must be %s, %s or %s)",
+			raw, corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever)
+	}
 }
 
 // runnerArch maps GOARCH to the values exposed via ${{ runner.arch }}.
@@ -148,12 +160,18 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		podSpec = opts["podspec"]
 	}
 
+	pullPolicy, err := parsePullPolicy(opts["image_pull_policy"])
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+
 	k8sCfg := &K8sJobConfig{
-		Namespace:   namespace,
-		PodSpec:     podSpec,
-		KubeConfig:  opts["kubeconfig"],
-		PollTimeout: pollTimeout,
-		JobTimeout:  jobTimeout,
+		Namespace:       namespace,
+		PodSpec:         podSpec,
+		KubeConfig:      opts["kubeconfig"],
+		PollTimeout:     pollTimeout,
+		JobTimeout:      jobTimeout,
+		ImagePullPolicy: pullPolicy,
 	}
 
 	logWriter := &grpcLogWriter{}

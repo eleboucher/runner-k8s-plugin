@@ -61,6 +61,7 @@ Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
 | `kubeconfig` | in-cluster | Path to kubeconfig file |
 | `poll_timeout` | `10m` | Timeout waiting for pod readiness |
 | `podspec` | — | Default PodSpec path (overridden by label arg) |
+| `image_pull_policy` | k8s default | Main container `imagePullPolicy`: `Always`, `IfNotPresent` or `Never`. Kubernetes defaults `:latest`/untagged images to `Always`. |
 | `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
 
 The runner also injects `label_arg` (per-job label argument, e.g. PodSpec path) and `job_timeout` automatically.

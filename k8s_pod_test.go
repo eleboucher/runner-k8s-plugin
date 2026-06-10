@@ -15,11 +15,11 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	clientfeatures "k8s.io/client-go/features"
+	clientfeaturestesting "k8s.io/client-go/features/testing"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 )
 
 var (
@@ -869,4 +869,171 @@ func TestIsClosedStreamError(t *testing.T) {
 			assert.Equal(t, tc.expected, got)
 		})
 	}
+}
+
+func TestPodCondition(t *testing.T) {
+	cases := []struct {
+		name     string
+		pod      *corev1.Pod
+		done     bool
+		errMatch string
+	}{
+		{
+			name: "pending_without_statuses_is_not_ready",
+			pod:  &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
+		},
+		{
+			name: "running_without_ready_condition_is_not_ready",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase:             corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Ready: true}},
+			}},
+		},
+		{
+			name: "ready_condition_true",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			}},
+			done: true,
+		},
+		{
+			name: "image_pull_backoff",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "main",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason: "ImagePullBackOff", Message: "Back-off pulling image",
+					}},
+				}},
+			}},
+			errMatch: "ImagePullBackOff",
+		},
+		{
+			name: "init_container_pull_error",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name:  "init",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}},
+				}},
+			}},
+			errMatch: "ErrImagePull",
+		},
+		{
+			name:     "failed_pod",
+			pod:      &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed, Message: "boom"}},
+			errMatch: "pod failed",
+		},
+		{
+			name:     "succeeded_pod",
+			pod:      &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
+			errMatch: "completed before",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			done, err := podCondition(tc.pod)
+			assert.Equal(t, tc.done, done)
+			if tc.errMatch == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errMatch)
+			}
+		})
+	}
+}
+
+func TestK8sJob_WaitForAllContainersReady_WaitsForReadyCondition(t *testing.T) {
+	// The fake clientset cannot serve streaming watch-list requests, so force
+	// the informer back to plain list+watch.
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-job-abc12",
+			Namespace: "test-ns",
+			Labels:    map[string]string{"batch.kubernetes.io/job-name": "test-job"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	fakeClient := fake.NewSimpleClientset(pending)
+
+	p := newTestK8sJob(t, fakeClient)
+	p.job = &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"}}
+
+	go func() {
+		// Give the informer time to observe the pending pod first.
+		time.Sleep(100 * time.Millisecond)
+		ready := pending.DeepCopy()
+		ready.Status.Phase = corev1.PodRunning
+		ready.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		_, err := fakeClient.CoreV1().Pods("test-ns").Update(context.Background(), ready, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+	}()
+
+	name, err := p.waitForAllContainersReady(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "test-job-abc12", name)
+}
+
+func TestPodWaitingSummary(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Message: "0/3 nodes are available",
+		}},
+		InitContainerStatuses: []corev1.ContainerStatus{{
+			Name:  "init",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}},
+		}},
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "main",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "ContainerCreating", Message: "pulling layers",
+			}},
+		}},
+	}}
+	summary := podWaitingSummary(pod)
+	assert.Contains(t, summary, "unscheduled: 0/3 nodes are available")
+	assert.Contains(t, summary, "init: PodInitializing")
+	assert.Contains(t, summary, "main: ContainerCreating (pulling layers)")
+
+	assert.Empty(t, podWaitingSummary(&corev1.Pod{}))
+}
+
+func TestK8sJob_PodEventsHint(t *testing.T) {
+	event := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "ev1", Namespace: "test-ns"},
+		InvolvedObject: corev1.ObjectReference{Name: "pod-1", Namespace: "test-ns"},
+		Reason:         "Pulling",
+		Message:        `Pulling image "node:22"`,
+	}
+	fakeClient := fake.NewSimpleClientset(event)
+	p := newTestK8sJob(t, fakeClient)
+
+	hint := p.podEventsHint(t.Context(), "pod-1")
+	assert.Contains(t, hint, `Pulling: Pulling image "node:22"`)
+
+	assert.Empty(t, p.podEventsHint(t.Context(), ""))
+}
+
+func TestK8sJob_CreateJob_ImagePullPolicy(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sJob(t, fakeClient)
+	p.config.ImagePullPolicy = corev1.PullIfNotPresent
+
+	job, err := p.createJob(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, corev1.PullIfNotPresent, job.Spec.Template.Spec.Containers[0].ImagePullPolicy)
+}
+
+func TestK8sJob_CreateJob_NoImagePullPolicyByDefault(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sJob(t, fakeClient)
+
+	job, err := p.createJob(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, job.Spec.Template.Spec.Containers[0].ImagePullPolicy)
 }

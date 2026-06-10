@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/tools/watch"
 	"k8s.io/kubectl/pkg/scheme"
+	"k8s.io/streaming/pkg/httpstream"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 )
@@ -42,11 +43,12 @@ import (
 const k8sPodSpecImageSentinel = "k8spod"
 
 type K8sJobConfig struct {
-	Namespace   string
-	PodSpec     string // path to podspec YAML file
-	KubeConfig  string
-	PollTimeout time.Duration
-	JobTimeout  time.Duration // total job timeout, used to set pod sleep duration
+	Namespace       string
+	PodSpec         string // path to podspec YAML file
+	KubeConfig      string
+	PollTimeout     time.Duration
+	JobTimeout      time.Duration // total job timeout, used to set pod sleep duration
+	ImagePullPolicy corev1.PullPolicy
 }
 
 type serviceContainerSpec struct {
@@ -606,6 +608,9 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 	if main.Image == "" {
 		return nil, errors.New("no container image specified (set it in the podspec or workflow runs-on)")
 	}
+	if p.config.ImagePullPolicy != "" {
+		main.ImagePullPolicy = p.config.ImagePullPolicy
+	}
 
 	main.Command = []string{"sh", "-c", fmt.Sprintf("mkdir -p %s && sleep %d", k8sWorkDir, int64(timeout.Seconds())+10)}
 
@@ -826,6 +831,7 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 			return p.client.CoreV1().Pods(p.namespace).Watch(ctx, opts)
 		},
 	}
+	var lastPodName, lastWaitState string
 	ev, err := watch.UntilWithSync(ctx, lw, &corev1.Pod{}, nil, func(event metav1watch.Event) (bool, error) {
 		if event.Type == metav1watch.Deleted {
 			return true, errors.New("pod was deleted while waiting for containers to be ready")
@@ -834,10 +840,21 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 		if !ok {
 			return false, nil
 		}
-		return podCondition(pod)
+		lastPodName = pod.Name
+		done, err := podCondition(pod)
+		if !done && err == nil {
+			if state := podWaitingSummary(pod); state != "" && state != lastWaitState {
+				lastWaitState = state
+				slog.Info("waiting for pod", "pod", pod.Name, "state", state)
+			}
+		}
+		return done, err
 	})
 	if wait.Interrupted(err) {
-		return "", errors.New("timeout waiting for all containers to become ready")
+		// ctx is already past its deadline; use a fresh one for the event lookup.
+		hintCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return "", fmt.Errorf("timeout waiting for all containers to become ready%s", p.podEventsHint(hintCtx, lastPodName))
 	}
 	if err != nil {
 		return "", err
@@ -886,7 +903,7 @@ func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
 
 func podCondition(pod *corev1.Pod) (bool, error) {
 	// Check for container failures
-	for _, cs := range pod.Status.ContainerStatuses {
+	for _, cs := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
 		if w := cs.State.Waiting; w != nil {
 			switch w.Reason {
 			case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
@@ -895,43 +912,65 @@ func podCondition(pod *corev1.Pod) (bool, error) {
 			}
 		}
 	}
-	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.Started != nil && !*cs.Started {
-			// Init container started but failed
-			if w := cs.State.Waiting; w != nil {
-				switch w.Reason {
-				case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
-					"CreateContainerConfigError", "InvalidImageName":
-					return false, fmt.Errorf("init container %s: %s: %s", cs.Name, w.Reason, w.Message)
-				}
-			}
-		}
-		if w := cs.State.Waiting; w != nil {
-			switch w.Reason {
-			case "ErrImagePull", "ImagePullBackOff", "CreateContainerError",
-				"CreateContainerConfigError", "InvalidImageName":
-				return false, fmt.Errorf("init container %s: %s: %s", cs.Name, w.Reason, w.Message)
-			}
-		}
-	}
 
-	// Check if pod has failed
-	if pod.Status.Phase == corev1.PodFailed {
+	switch pod.Status.Phase {
+	case corev1.PodFailed:
 		return false, fmt.Errorf("pod failed: %s", pod.Status.Message)
+	case corev1.PodSucceeded:
+		return false, errors.New("pod completed before it could accept commands")
 	}
 
-	// Check all containers are ready
-	for _, cs := range pod.Status.ContainerStatuses {
-		if !cs.Ready {
-			return false, nil
+	// A pending pod has no container statuses yet, so per-container checks
+	// can't be trusted; the Ready condition covers init containers too.
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true, nil
 		}
 	}
-	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.Started == nil || !cs.Ready {
-			return false, nil
+	return false, nil
+}
+
+// podWaitingSummary describes why a pod is not ready yet, for progress logging.
+func podWaitingSummary(pod *corev1.Pod) string {
+	var parts []string
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status != corev1.ConditionTrue && cond.Message != "" {
+			parts = append(parts, "unscheduled: "+cond.Message)
 		}
 	}
-	return true, nil
+	for _, cs := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+		if w := cs.State.Waiting; w != nil && w.Reason != "" {
+			s := cs.Name + ": " + w.Reason
+			if w.Message != "" {
+				s += " (" + w.Message + ")"
+			}
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// podEventsHint formats the pod's most recent events for appending to an
+// error message, or "" if none could be fetched.
+func (p *K8sJob) podEventsHint(ctx context.Context, podName string) string {
+	if podName == "" {
+		return ""
+	}
+	events, err := p.client.CoreV1().Events(p.namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.name=" + podName,
+	})
+	if err != nil || len(events.Items) == 0 {
+		return ""
+	}
+	items := events.Items
+	if len(items) > 5 {
+		items = items[len(items)-5:]
+	}
+	parts := make([]string, 0, len(items))
+	for _, e := range items {
+		parts = append(parts, e.Reason+": "+e.Message)
+	}
+	return "; recent pod events: " + strings.Join(parts, "; ")
 }
 
 func (p *K8sJob) deleteJob(ctx context.Context) error {
@@ -1042,8 +1081,10 @@ func (p *K8sJob) newExecCommand(podName string, opts *corev1.PodExecOptions) (re
 	if err != nil {
 		return nil, fmt.Errorf("create SPDY executor: %w", err)
 	}
+	// Fall back to SPDY only on upgrade failures (same predicate as kubectl),
+	// so a failed command doesn't run a second time.
 	exec, err := remotecommand.NewFallbackExecutor(wsExec, spdyExec, func(err error) bool {
-		return true
+		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create fallback executor: %w", err)

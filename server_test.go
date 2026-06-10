@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -116,4 +117,16 @@ func TestParseLabels(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestParsePullPolicy(t *testing.T) {
+	for _, valid := range []string{"", "Always", "IfNotPresent", "Never"} {
+		got, err := parsePullPolicy(valid)
+		require.NoError(t, err)
+		assert.Equal(t, corev1.PullPolicy(valid), got)
+	}
+
+	_, err := parsePullPolicy("sometimes")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image_pull_policy")
 }
