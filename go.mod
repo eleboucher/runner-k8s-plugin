@@ -7,7 +7,7 @@ toolchain go1.26.4
 replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.10.2
 
 require (
-	code.forgejo.org/forgejo/runner/v12 v12.10.2
+	code.forgejo.org/forgejo/runner/v12 v12.11.0
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.81.1
