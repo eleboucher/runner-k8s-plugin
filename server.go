@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -80,16 +82,23 @@ type k8sServer struct {
 
 	pluginInstanceID string
 
+	// logJobOutput mirrors job stdout/stderr into the plugin's own logs in
+	// addition to the runner stream. Off by default: job output is unmasked
+	// and can contain secrets.
+	logJobOutput bool
+
 	mu   sync.Mutex
 	envs map[string]*k8sEnvironment
 }
 
 func newK8sServer() *k8sServer {
+	logJobOutput, _ := strconv.ParseBool(os.Getenv("FORGEJO_RUNNER_K8S_LOG_JOB_OUTPUT"))
 	s := &k8sServer{
 		pluginInstanceID: uuid.New().String(),
 		envs:             make(map[string]*k8sEnvironment),
+		logJobOutput:     logJobOutput,
 	}
-	slog.Info("plugin instance initialized", "instance_id", s.pluginInstanceID)
+	slog.Info("plugin instance initialized", "instance_id", s.pluginInstanceID, "log_job_output", logJobOutput)
 	return s
 }
 
@@ -185,7 +194,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		Resources:       resources,
 	}
 
-	logWriter := &grpcLogWriter{}
+	logWriter := &grpcLogWriter{stream: "create"}
 
 	job, err := NewK8sJob(&container.NewContainerInput{
 		Image:      req.GetImage(),
@@ -268,7 +277,14 @@ func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingS
 	stdoutW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDOUT}
 	stderrW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDERR}
 
-	oldOut, oldErr := env.job.ReplaceLogWriter(stdoutW, stderrW)
+	var outW, errW io.Writer = stdoutW, stderrW
+	if s.logJobOutput {
+		// Tee output to the plugin's own logs as well as the runner stream.
+		outW = io.MultiWriter(stdoutW, &grpcLogWriter{stream: "stdout"})
+		errW = io.MultiWriter(stderrW, &grpcLogWriter{stream: "stderr"})
+	}
+
+	oldOut, oldErr := env.job.ReplaceLogWriter(outW, errW)
 	defer env.job.ReplaceLogWriter(oldOut, oldErr)
 
 	execErr := env.job.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
@@ -497,11 +513,14 @@ func (w *execStreamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-type grpcLogWriter struct{}
+type grpcLogWriter struct {
+	stream string
+}
 
 func (w *grpcLogWriter) Write(p []byte) (int, error) {
-	if len(p) > 0 {
-		slog.Debug("k8s output", "data", string(p))
+	// Check the level before string(p): this is on the per-chunk Exec path.
+	if len(p) > 0 && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("k8s output", "stream", w.stream, "data", string(p))
 	}
 	return len(p), nil
 }
