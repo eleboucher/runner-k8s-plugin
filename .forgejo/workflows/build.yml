@@ -1,56 +1,50 @@
 name: Build and push container images
-
 on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-images:
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
-
+      - name: Compute build timestamp
+        id: build-meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Login to code.forgejo.org
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: code.forgejo.org
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.CODEBERG_TOKEN }}
-
       - name: Login to git.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: git.erwanleboucher.dev
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.OWNER_PACKAGE_SECRET }}
-
-      - name: Login to registry.erwanleboucher.dev
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: https://data.forgejo.org/docker/login-action@v4
-        with:
-          registry: registry.erwanleboucher.dev
-          username: ${{ vars.USERNAME }}
-          password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
-
       - name: Compute image metadata
         id: meta
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            name=code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin
-            name=git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin
-            name=registry.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            code.forgejo.org/${{ vars.USERNAME }}/runner-k8s-plugin
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/runner-k8s-plugin
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
+          labels: |
+            org.opencontainers.image.title=runner-k8s-plugin
+            org.opencontainers.image.description=Forgejo Runner backend plugin that executes CI/CD jobs as Kubernetes pods
+            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/eleboucher/runner-k8s-plugin/src/branch/main/README.md
+            org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
+            org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -59,3 +53,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.build-meta.outputs.created }}

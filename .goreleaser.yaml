@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: runner-k8s-plugin
+gitea_urls:
+  api: https://git.erwanleboucher.dev/api/v1
+  download: https://git.erwanleboucher.dev
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: runner-k8s-plugin
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    main: .
+    binary: forgejo-runner-k8s
+
+archives:
+  - id: runner-k8s-plugin
+    ids:
+      - runner-k8s-plugin

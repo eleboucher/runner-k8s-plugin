@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+var version = "dev"
+
 func main() {
 	configureLogging()
 
@@ -51,7 +53,7 @@ func main() {
 	defer lis.Close()
 
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-	slog.Info("plugin listening", "address", *listen)
+	slog.Info("plugin listening", "address", *listen, "version", version)
 
 	go func() {
 		if err := srv.Serve(lis); err != nil {
