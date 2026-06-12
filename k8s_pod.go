@@ -49,6 +49,7 @@ type K8sJobConfig struct {
 	PollTimeout     time.Duration
 	JobTimeout      time.Duration // total job timeout, used to set pod sleep duration
 	ImagePullPolicy corev1.PullPolicy
+	Resources       *corev1.ResourceRequirements // default resources for containers without their own
 }
 
 type serviceContainerSpec struct {
@@ -667,6 +668,8 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 		})
 	}
 
+	applyDefaultResources(&job.Spec.Template, p.config.Resources)
+
 	job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
 	job.Spec.BackoffLimit = new(int32)
 	*job.Spec.BackoffLimit = 0
@@ -692,6 +695,24 @@ func (p *K8sJob) findMainContainer(podTemplate *corev1.PodTemplateSpec) int {
 		}
 	}
 	return -1
+}
+
+// applyDefaultResources sets def on every container that declares neither
+// requests nor limits, leaving podspec-defined resources untouched.
+func applyDefaultResources(podTemplate *corev1.PodTemplateSpec, def *corev1.ResourceRequirements) {
+	if def == nil || (len(def.Requests) == 0 && len(def.Limits) == 0) {
+		return
+	}
+	apply := func(containers []corev1.Container) {
+		for i := range containers {
+			c := &containers[i]
+			if len(c.Resources.Requests) == 0 && len(c.Resources.Limits) == 0 {
+				c.Resources = *def.DeepCopy()
+			}
+		}
+	}
+	apply(podTemplate.Spec.InitContainers)
+	apply(podTemplate.Spec.Containers)
 }
 
 func (p *K8sJob) ensureSharedVolume(podTemplate *corev1.PodTemplateSpec, main *corev1.Container) {

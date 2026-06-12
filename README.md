@@ -63,6 +63,7 @@ Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
 | `podspec` | — | Default PodSpec path (overridden by label arg) |
 | `image_pull_policy` | k8s default | Main container `imagePullPolicy`: `Always`, `IfNotPresent` or `Never`. Kubernetes defaults `:latest`/untagged images to `Always`. |
 | `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
+| `resources` | — | Inline YAML `ResourceRequirements` applied to any container (init or regular) that doesn't declare its own. Mainly covers service containers, which otherwise carry no resources. PodSpec resources are kept as-is. |
 
 The runner also injects `label_arg` (per-job label argument, e.g. PodSpec path) and `job_timeout` automatically.
 

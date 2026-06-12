@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	k8sexec "k8s.io/client-go/util/exec"
+	"sigs.k8s.io/yaml"
 )
 
 // parseLabels parses "k=v,k=v" pairs. ${ENV_ID} in values expands to envID.
@@ -165,6 +166,15 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
+	var resources *corev1.ResourceRequirements
+	if v := opts["resources"]; v != "" {
+		var rr corev1.ResourceRequirements
+		if err := yaml.Unmarshal([]byte(v), &rr); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "parse resources option: %v", err)
+		}
+		resources = &rr
+	}
+
 	k8sCfg := &K8sJobConfig{
 		Namespace:       namespace,
 		PodSpec:         podSpec,
@@ -172,6 +182,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		PollTimeout:     pollTimeout,
 		JobTimeout:      jobTimeout,
 		ImagePullPolicy: pullPolicy,
+		Resources:       resources,
 	}
 
 	logWriter := &grpcLogWriter{}

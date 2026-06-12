@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	clientfeatures "k8s.io/client-go/features"
@@ -186,6 +187,90 @@ restartPolicy: Never
 	main := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "custom-image:latest", main.Image)
 	assert.NotNil(t, main.Resources.Requests)
+}
+
+func TestK8sJob_CreateJob_DefaultResourcesFillServiceContainers(t *testing.T) {
+	tmpFile := t.TempDir() + "/podspec.yaml"
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`containers:
+  - name: main
+    image: custom-image:latest
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+restartPolicy: Never
+`), 0o644))
+
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sJob(t, fakeClient)
+	p.input.Image = "k8spod"
+	p.config.PodSpec = tmpFile
+	p.config.Resources = &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
+		},
+	}
+	p.AddServiceContainerRaw("redis", "redis:7", nil, nil)
+
+	job, err := p.createJob(t.Context())
+	require.NoError(t, err)
+
+	var main, svc *corev1.Container
+	for i := range job.Spec.Template.Spec.Containers {
+		switch job.Spec.Template.Spec.Containers[i].Name {
+		case "main":
+			main = &job.Spec.Template.Spec.Containers[i]
+		case "redis":
+			svc = &job.Spec.Template.Spec.Containers[i]
+		}
+	}
+	require.NotNil(t, main)
+	require.NotNil(t, svc)
+
+	// podspec resources kept; bare service container gets the default
+	assert.Equal(t, "500m", main.Resources.Requests.Cpu().String())
+	assert.Equal(t, "512Mi", main.Resources.Requests.Memory().String())
+
+	assert.Equal(t, "100m", svc.Resources.Requests.Cpu().String())
+	assert.Equal(t, "128Mi", svc.Resources.Requests.Memory().String())
+	assert.Equal(t, "256Mi", svc.Resources.Limits.Memory().String())
+}
+
+func TestApplyDefaultResources(t *testing.T) {
+	def := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+	}
+	explicit := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+	}
+	tmpl := &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{
+				{Name: "dind", Resources: explicit},
+				{Name: "init-bare"},
+			},
+			Containers: []corev1.Container{
+				{Name: "main", Resources: explicit},
+				{Name: "svc"},
+			},
+		},
+	}
+
+	applyDefaultResources(tmpl, def)
+
+	assert.Equal(t, "1Gi", tmpl.Spec.InitContainers[0].Resources.Requests.Memory().String(), "explicit init container kept")
+	assert.Equal(t, "128Mi", tmpl.Spec.InitContainers[1].Resources.Requests.Memory().String(), "bare init container defaulted")
+	assert.Equal(t, "1Gi", tmpl.Spec.Containers[0].Resources.Requests.Memory().String(), "explicit container kept")
+	assert.Equal(t, "128Mi", tmpl.Spec.Containers[1].Resources.Requests.Memory().String(), "bare container defaulted")
+
+	// A nil default is a no-op and must not panic.
+	bare := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "x"}}}}
+	applyDefaultResources(bare, nil)
+	assert.Empty(t, bare.Spec.Containers[0].Resources.Requests)
 }
 
 func TestK8sJob_CreateJob_PodSpecImageOverriddenByInput(t *testing.T) {
