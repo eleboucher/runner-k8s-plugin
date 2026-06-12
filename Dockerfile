@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 go build \
     -o /forgejo-runner-k8s \
     .
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 ARG VERSION=dev
 ARG REVISION=unknown
