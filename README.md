@@ -85,6 +85,14 @@ pluginsv2:
       labels: "app.kubernetes.io/name=forgejo-runner,app.kubernetes.io/instance=runner-${ENV_ID}"
 ```
 
+## Logging
+
+The plugin logs to stderr. The level follows `FORGEJO_RUNNER_LOG_LEVEL` (or `HCLOG_LEVEL`), defaulting to `info`.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `FORGEJO_RUNNER_K8S_LOG_JOB_OUTPUT` | `false` | Mirror job stdout/stderr into the plugin's own logs (at `debug` level), in addition to streaming it to the runner. Off by default: job output is unmasked and may contain secrets that would then land in the plugin's pod logs. |
+
 ## PodSpec files
 
 PodSpec files customize the pod template per label. A container named `main` is used for step execution. If absent, one is prepended automatically.
