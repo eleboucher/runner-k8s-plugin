@@ -170,11 +170,15 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 			slog.Debug("ignoring user parameter", "user", user)
 		}
 
-		// Fall back to the configured workdir (equivalent to Docker's container
-		// WorkingDir) so that callers like run-steps that pass an empty workdir
-		// still execute inside the repository checkout directory.
-		if workdir == "" && p.input.WorkingDir != "" {
+		// The runner passes `working-directory:` verbatim, so it may be empty or
+		// relative. Resolve it against the container WorkingDir like the host and
+		// docker backends do; otherwise a relative path resolves against the
+		// container's default cwd (/tmp).
+		switch {
+		case workdir == "":
 			workdir = p.input.WorkingDir
+		case !filepath.IsAbs(workdir) && p.input.WorkingDir != "":
+			workdir = filepath.Join(p.input.WorkingDir, workdir)
 		}
 
 		if workdir != "" {
