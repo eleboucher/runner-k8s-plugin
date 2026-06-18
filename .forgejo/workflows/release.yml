@@ -34,7 +34,7 @@ jobs:
   container:
     runs-on: multiarch
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
 
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
 
