@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"code.forgejo.org/forgejo/runner/v12/act/container"
+	"code.forgejo.org/forgejo/runner/v12/act/plugin"
 	pluginv1 "code.forgejo.org/forgejo/runner/v12/act/plugin/proto/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -114,6 +115,7 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 
 func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequest) (*pluginv1.CapabilitiesResponse, error) {
 	return &pluginv1.CapabilitiesResponse{
+		ProtocolVersion:            plugin.ProtocolVersion,
 		Name:                       "k8sjob",
 		RootPath:                   k8sSharedMount,
 		ActPath:                    k8sActPath,
@@ -199,7 +201,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	job, err := NewK8sJob(&container.NewContainerInput{
 		Image:      req.GetImage(),
 		Name:       req.GetName(),
-		Env:        req.GetEnv(),
+		Env:        envMapToSlice(req.GetEnv()),
 		WorkingDir: req.GetWorkingDir(),
 		Stdout:     logWriter,
 		Stderr:     logWriter,
@@ -515,6 +517,16 @@ func (w *execStreamWriter) Write(p []byte) (int, error) {
 
 type grpcLogWriter struct {
 	stream string
+}
+
+// envMapToSlice converts the proto env map (map<string,string>) into the
+// []string "K=V" form expected by container.NewContainerInput.
+func envMapToSlice(env map[string]string) []string {
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 func (w *grpcLogWriter) Write(p []byte) (int, error) {
