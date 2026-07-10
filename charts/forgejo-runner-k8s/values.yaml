@@ -1,0 +1,127 @@
+---
+# Default values for forgejo-runner-k8s.
+
+# -- Number of runner replicas.
+replicaCount: 1
+
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+forgejo:
+  # -- Forgejo instance URL the runner registers against (REQUIRED), e.g. `http://forgejo-http:3000`.
+  url: ""
+  # -- Name of an existing Secret holding the runner registration `token` and `uuid` (REQUIRED).
+  # Manage it however you like (SOPS, External Secrets, a plain Secret); the chart only reads it.
+  existingSecret: ""
+  secretKeys:
+    # -- Key within the Secret holding the registration token.
+    token: token
+    # -- Key within the Secret holding the runner UUID.
+    uuid: uuid
+
+# Runner image. MUST be a forgejo-runner build that supports the Kubernetes backend plugin
+# (currently the fork at git.erwanleboucher.dev/eleboucher/runner). Keep the tag compatible
+# with the plugin version below.
+image:
+  # -- Runner image repository.
+  repository: git.erwanleboucher.dev/eleboucher/runner
+  # -- Runner image tag (REQUIRED).
+  tag: ""
+  # -- Pin the runner image by digest (`sha256:…`); when set, overrides the tag.
+  digest: ""
+  # -- Runner image pull policy.
+  pullPolicy: IfNotPresent
+
+plugin:
+  image:
+    # -- Plugin image repository.
+    repository: git.erwanleboucher.dev/eleboucher/runner-k8s-plugin
+    # -- Plugin image tag; defaults to the chart appVersion when empty.
+    tag: ""
+    # -- Pin the plugin image by digest (`sha256:…`); when set, overrides the tag.
+    digest: ""
+    # -- Plugin image pull policy.
+    pullPolicy: IfNotPresent
+  # -- Unix socket the plugin listens on and the runner connects to. Your runnerConfig's
+  # `plugins.k8s.address` MUST be `unix://<this path>`.
+  socketPath: /plugin/forgejo-runner-k8s.sock
+  # -- Plugin sidecar resources.
+  resources:
+    requests:
+      cpu: 5m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# -- Full contents of `runner.yaml` (REQUIRED — no default is shipped). See
+# [examples/values-example.yaml](./examples/values-example.yaml) for a complete config. The plugin
+# listens on `plugin.socketPath`, so set `plugins.k8s.address: "unix:///plugin/forgejo-runner-k8s.sock"`
+# and `plugins.k8s.options.namespace` to this release's namespace (where job pods are created).
+runnerConfig: ""
+
+# -- PodSpec files referenced by your runner labels, keyed by filename -> content (REQUIRED).
+# Mounted read-only into `/config` next to `runner.yaml`.
+podSpecs: {}
+
+# -- Override the runner container command. When empty, the chart builds a
+# `forgejo-runner daemon` invocation from `forgejo.url` and the mounted secret.
+command: []
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a ServiceAccount.
+  create: true
+  # -- Automount the API token (required — the runner talks to the API server via the plugin).
+  automount: true
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+  # -- Name of the ServiceAccount; generated when empty.
+  name: ""
+
+rbac:
+  # -- Create the Role/RoleBinding granting the runner permission to manage job pods.
+  create: true
+
+# -- Runner container resources.
+resources:
+  requests:
+    cpu: 5m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# -- Pod annotations. The default rolls the deployment when the config changes (requires stakater/reloader).
+podAnnotations:
+  reloader.stakater.com/auto: "true"
+# -- Extra pod labels.
+podLabels: {}
+
+# -- Pod security context.
+podSecurityContext:
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  runAsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# -- Container security context (applied to both the runner and the plugin sidecar).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Termination grace period. Must cover `runner.shutdown_timeout` plus the plugin's ~60s cleanup budget.
+terminationGracePeriodSeconds: 300
+
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity.
+affinity: {}

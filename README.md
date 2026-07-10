@@ -2,6 +2,22 @@
 
 A backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) that executes CI/CD jobs as Kubernetes pods. Each job runs in its own pod with optional service containers as sidecars, a shared volume, and custom PodSpec support.
 
+## Deploying
+
+The easiest way to run the full runner + plugin on Kubernetes is the Helm chart in
+[`charts/forgejo-runner-k8s`](charts/forgejo-runner-k8s), which runs the plugin as a
+native sidecar and wires up RBAC, config, and graceful shutdown for you:
+
+```sh
+helm install forgejo-runner-k8s \
+  oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner-k8s \
+  --namespace forgejo --create-namespace \
+  -f my-values.yaml
+```
+
+See the [chart README](charts/forgejo-runner-k8s/README.md) and
+[example values](charts/forgejo-runner-k8s/examples/values-example.yaml).
+
 ## Building
 
 - Install [Go](https://go.dev/doc/install)

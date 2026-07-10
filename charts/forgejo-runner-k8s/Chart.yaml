@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://json.schemastore.org/chart.json
+apiVersion: v2
+name: forgejo-runner-k8s
+description: Forgejo Runner with the Kubernetes backend plugin, running the plugin as a native sidecar.
+type: application
+# Chart version. Bumped independently of the plugin/runner image versions.
+version: 0.1.0
+# Default plugin image tag (see values.yaml: plugin.image.tag).
+appVersion: "12.10.6"
+# Native sidecars (restartPolicy: Always on an initContainer) require Kubernetes 1.29+.
+kubeVersion: ">=1.29.0-0"
+home: https://git.erwanleboucher.dev/eleboucher/runner-k8s-plugin
+sources:
+  - https://git.erwanleboucher.dev/eleboucher/runner-k8s-plugin
+maintainers:
+  - name: Erwan Leboucher
+    email: erwanleboucher@gmail.com
+keywords:
+  - forgejo
+  - forgejo-runner
+  - ci
+  - kubernetes

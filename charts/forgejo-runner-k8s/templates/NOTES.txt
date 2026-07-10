@@ -1,0 +1,10 @@
+{{ include "forgejo-runner-k8s.fullname" . }} deployed to namespace {{ .Release.Namespace }}.
+
+Runner image:  {{ .Values.image.repository }}:{{ .Values.image.tag }}
+Plugin image:  {{ include "forgejo-runner-k8s.pluginImage" . }}
+
+The plugin runs as a native sidecar and creates job pods in this namespace.
+Watch it register:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "forgejo-runner-k8s.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "forgejo-runner-k8s.fullname" . }} -c runner -f

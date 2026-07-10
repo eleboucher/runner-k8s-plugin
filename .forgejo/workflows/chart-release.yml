@@ -1,0 +1,35 @@
+name: Release Helm chart
+on:
+  push:
+    tags:
+      - "chart-v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  chart:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Resolve chart version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#chart-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to git.erwanleboucher.dev
+        run: helm registry login git.erwanleboucher.dev -u "${{ vars.USERNAME }}" -p "${{ secrets.OWNER_PACKAGE_SECRET }}"
+
+      - name: Package chart
+        run: |
+          helm package charts/forgejo-runner-k8s \
+            --version "${{ steps.version.outputs.version }}"
+
+      - name: Push chart
+        run: |
+          helm push "forgejo-runner-k8s-${{ steps.version.outputs.version }}.tgz" \
+            oci://git.erwanleboucher.dev/${{ vars.USERNAME }}/charts

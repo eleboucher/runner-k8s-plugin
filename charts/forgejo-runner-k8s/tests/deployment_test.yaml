@@ -1,0 +1,86 @@
+---
+suite: deployment
+templates:
+  - templates/deployment.tpl
+  - templates/configmap.tpl
+tests:
+  - it: renders a Deployment with the runner container and plugin sidecar
+    template: templates/deployment.tpl
+    set:
+      forgejo:
+        url: http://forgejo-http:3000
+        existingSecret: forgejo-runner-secret
+      image:
+        tag: "12.10.2"
+      runnerConfig: "runner: {capacity: 1}"
+      podSpecs:
+        podspec-default.yaml: "restartPolicy: Never"
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: runner
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: k8s-plugin
+      - equal:
+          path: spec.template.spec.initContainers[0].restartPolicy
+          value: Always
+
+  - it: defaults the plugin tag to the chart appVersion
+    template: templates/deployment.tpl
+    set:
+      forgejo: {url: http://x:3000, existingSecret: s}
+      image: {tag: "12.10.2"}
+      runnerConfig: "runner: {}"
+      podSpecs: {a.yaml: "x"}
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].image
+          pattern: "runner-k8s-plugin:.+$"
+
+  - it: pins the runner image by digest when set
+    template: templates/deployment.tpl
+    set:
+      forgejo: {url: http://x:3000, existingSecret: s}
+      image: {digest: "sha256:deadbeef"}
+      runnerConfig: "runner: {}"
+      podSpecs: {a.yaml: "x"}
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].image
+          pattern: "@sha256:deadbeef$"
+
+  - it: builds the daemon command from forgejo.url
+    template: templates/deployment.tpl
+    set:
+      forgejo: {url: http://forgejo-http:3000, existingSecret: s}
+      image: {tag: "12.10.2"}
+      runnerConfig: "runner: {}"
+      podSpecs: {a.yaml: "x"}
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: "--url \"http://forgejo-http:3000\""
+
+  - it: fails when runnerConfig is missing
+    template: templates/configmap.tpl
+    set:
+      forgejo: {url: http://x:3000, existingSecret: s}
+      image: {tag: "12.10.2"}
+      podSpecs: {a.yaml: "x"}
+    asserts:
+      - failedTemplate:
+          errorMessage: "forgejo-runner-k8s: .Values.runnerConfig is required. Provide the full runner.yaml — see examples/values-example.yaml."
+
+  - it: fails when forgejo.url is missing
+    template: templates/deployment.tpl
+    set:
+      forgejo: {existingSecret: s}
+      image: {tag: "12.10.2"}
+      runnerConfig: "runner: {}"
+      podSpecs: {a.yaml: "x"}
+    asserts:
+      - failedTemplate:
+          errorMessage: "forgejo-runner-k8s: .Values.forgejo.url is required."
