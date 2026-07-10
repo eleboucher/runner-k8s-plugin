@@ -64,10 +64,17 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            # the plugin reads the podspec files itself when creating job pods
+            # the plugin shares the runner's volumes: it reads podspecs from /config and,
+            # for the CopyLocal fast path, reads the runner's action cache under /data;
+            # /tmp is writable scratch for large-archive spill (readOnlyRootFilesystem).
             - name: config
               mountPath: /config
               readOnly: true
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
             - name: plugin
               mountPath: {{ dir .Values.plugin.socketPath }}
       containers:

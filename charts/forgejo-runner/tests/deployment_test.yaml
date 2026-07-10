@@ -30,13 +30,24 @@ tests:
       - equal:
           path: metadata.annotations["reloader.stakater.com/auto"]
           value: "true"
-      # the plugin sidecar must mount /config so it can read podspec files
+      # the plugin sidecar shares the runner's volumes (podspecs + CopyLocal cache + tmp)
       - contains:
           path: spec.template.spec.initContainers[0].volumeMounts
           content:
             name: config
             mountPath: /config
             readOnly: true
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: data
+            mountPath: /data
+            readOnly: true
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
 
   - it: defaults the plugin tag to the chart appVersion
     template: templates/deployment.tpl
