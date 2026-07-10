@@ -10,9 +10,9 @@ image:
   repository: git.erwanleboucher.dev/eleboucher/runner
   tag: "12.10.2"
 
-plugin:
-  image:
-    tag: "12.10.6"
+# plugin.image.tag is intentionally omitted: it defaults to the chart appVersion,
+# which the release workflow sets equal to the chart version. So the plugin image
+# always uses the same tag as the chart you installed.
 
 # runner.yaml, verbatim. Note plugins.k8s.address matches plugin.socketPath,
 # and options.namespace is the namespace this release is installed into.

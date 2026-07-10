@@ -2,7 +2,7 @@
 
 Forgejo Runner with the Kubernetes backend plugin, running the plugin as a native sidecar.
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 12.10.6](https://img.shields.io/badge/AppVersion-12.10.6-informational?style=flat-square)
+![Version: 0.0.0](https://img.shields.io/badge/Version-0.0.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0](https://img.shields.io/badge/AppVersion-0.0.0-informational?style=flat-square)
 
 ## Installing
 
@@ -57,7 +57,7 @@ as a starting point. Your `runnerConfig` must point `plugins.k8s.address` at
 | plugin.image.digest | string | `""` | Pin the plugin image by digest (`sha256:…`); when set, overrides the tag. |
 | plugin.image.pullPolicy | string | `"IfNotPresent"` | Plugin image pull policy. |
 | plugin.image.repository | string | `"git.erwanleboucher.dev/eleboucher/runner-k8s-plugin"` | Plugin image repository. |
-| plugin.image.tag | string | `""` | Plugin image tag; defaults to the chart appVersion when empty. |
+| plugin.image.tag | string | `""` | Plugin image tag; defaults to the chart appVersion when empty. Since a release sets appVersion == chart version, the plugin image uses the same tag as the chart by default. |
 | plugin.resources | object | `{"limits":{"memory":"128Mi"},"requests":{"cpu":"5m","memory":"32Mi"}}` | Plugin sidecar resources. |
 | plugin.socketPath | string | `"/plugin/forgejo-runner-k8s.sock"` | Unix socket the plugin listens on and the runner connects to. Your runnerConfig's `plugins.k8s.address` MUST be `unix://<this path>`. |
 | podAnnotations | object | `{}` | Pod annotations. |

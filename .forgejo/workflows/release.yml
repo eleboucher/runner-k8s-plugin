@@ -93,3 +93,48 @@ jobs:
             VERSION=${{ github.ref_name }}
             REVISION=${{ github.sha }}
             CREATED=${{ steps.build-meta.outputs.created }}
+
+  chart:
+    runs-on: docker
+    needs: container
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v7
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Resolve version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to git.erwanleboucher.dev
+        run: helm registry login git.erwanleboucher.dev -u "${{ vars.USERNAME }}" -p "${{ secrets.OWNER_PACKAGE_SECRET }}"
+
+      - name: Package chart
+        run: |
+          helm package charts/forgejo-runner-k8s \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.version }}"
+
+      - name: Push chart
+        id: push
+        run: |
+          out=$(helm push "forgejo-runner-k8s-${{ steps.version.outputs.version }}.tgz" \
+            oci://git.erwanleboucher.dev/${{ vars.USERNAME }}/charts 2>&1)
+          echo "$out"
+          echo "digest=$(echo "$out" | awk '/Digest:/ {print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        run: |
+          curl -fsSL -o /usr/local/bin/cosign \
+            https://github.com/sigstore/cosign/releases/download/v3.1.0/cosign-linux-amd64
+          chmod +x /usr/local/bin/cosign
+
+      - name: Sign chart
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cosign login git.erwanleboucher.dev -u "${{ vars.USERNAME }}" -p "${{ secrets.OWNER_PACKAGE_SECRET }}"
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
+            "git.erwanleboucher.dev/${{ vars.USERNAME }}/charts/forgejo-runner-k8s@${{ steps.push.outputs.digest }}"

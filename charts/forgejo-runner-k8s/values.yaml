@@ -38,7 +38,8 @@ plugin:
   image:
     # -- Plugin image repository.
     repository: git.erwanleboucher.dev/eleboucher/runner-k8s-plugin
-    # -- Plugin image tag; defaults to the chart appVersion when empty.
+    # -- Plugin image tag; defaults to the chart appVersion when empty. Since a release sets
+    # appVersion == chart version, the plugin image uses the same tag as the chart by default.
     tag: ""
     # -- Pin the plugin image by digest (`sha256:…`); when set, overrides the tag.
     digest: ""
