@@ -64,6 +64,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            # the plugin reads the podspec files itself when creating job pods
+            - name: config
+              mountPath: /config
+              readOnly: true
             - name: plugin
               mountPath: {{ dir .Values.plugin.socketPath }}
       containers:
