@@ -94,9 +94,12 @@ resources:
   limits:
     memory: 1Gi
 
-# -- Pod annotations. The default rolls the deployment when the config changes (requires stakater/reloader).
-podAnnotations:
+# -- Deployment annotations. The default rolls the deployment when the config ConfigMap
+# changes (requires stakater/reloader; the annotation must sit on the workload, not the pod).
+deploymentAnnotations:
   reloader.stakater.com/auto: "true"
+# -- Pod annotations.
+podAnnotations: {}
 # -- Extra pod labels.
 podLabels: {}
 

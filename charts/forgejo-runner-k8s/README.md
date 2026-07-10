@@ -41,6 +41,7 @@ as a starting point. Your `runnerConfig` must point `plugins.k8s.address` at
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity. |
 | command | list | `[]` | Override the runner container command. When empty, the chart builds a `forgejo-runner daemon` invocation from `forgejo.url` and the mounted secret. |
+| deploymentAnnotations | object | `{"reloader.stakater.com/auto":"true"}` | Deployment annotations. The default rolls the deployment when the config ConfigMap changes (requires stakater/reloader; the annotation must sit on the workload, not the pod). |
 | forgejo.existingSecret | string | `""` | Name of an existing Secret holding the runner registration `token` and `uuid` (REQUIRED). Manage it however you like (SOPS, External Secrets, a plain Secret); the chart only reads it. |
 | forgejo.secretKeys.token | string | `"token"` | Key within the Secret holding the registration token. |
 | forgejo.secretKeys.uuid | string | `"uuid"` | Key within the Secret holding the runner UUID. |
@@ -59,7 +60,7 @@ as a starting point. Your `runnerConfig` must point `plugins.k8s.address` at
 | plugin.image.tag | string | `""` | Plugin image tag; defaults to the chart appVersion when empty. |
 | plugin.resources | object | `{"limits":{"memory":"128Mi"},"requests":{"cpu":"5m","memory":"32Mi"}}` | Plugin sidecar resources. |
 | plugin.socketPath | string | `"/plugin/forgejo-runner-k8s.sock"` | Unix socket the plugin listens on and the runner connects to. Your runnerConfig's `plugins.k8s.address` MUST be `unix://<this path>`. |
-| podAnnotations | object | `{"reloader.stakater.com/auto":"true"}` | Pod annotations. The default rolls the deployment when the config changes (requires stakater/reloader). |
+| podAnnotations | object | `{}` | Pod annotations. |
 | podLabels | object | `{}` | Extra pod labels. |
 | podSecurityContext | object | `{"fsGroup":1000,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":1000,"runAsNonRoot":true,"runAsUser":1000}` | Pod security context. |
 | podSpecs | object | `{}` | PodSpec files referenced by your runner labels, keyed by filename -> content (REQUIRED). Mounted read-only into `/config` next to `runner.yaml`. |

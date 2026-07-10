@@ -27,6 +27,9 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[0].restartPolicy
           value: Always
+      - equal:
+          path: metadata.annotations["reloader.stakater.com/auto"]
+          value: "true"
 
   - it: defaults the plugin tag to the chart appVersion
     template: templates/deployment.tpl

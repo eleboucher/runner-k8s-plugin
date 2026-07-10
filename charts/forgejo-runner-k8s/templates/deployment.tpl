@@ -13,6 +13,10 @@ metadata:
   name: {{ include "forgejo-runner-k8s.fullname" . }}
   labels:
     {{- include "forgejo-runner-k8s.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -20,8 +24,10 @@ spec:
       {{- include "forgejo-runner-k8s.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
       annotations:
-        {{- toYaml .Values.podAnnotations | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         {{- include "forgejo-runner-k8s.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
