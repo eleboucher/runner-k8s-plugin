@@ -75,7 +75,7 @@ tests:
       podSpecs: {a.yaml: "x"}
     asserts:
       - failedTemplate:
-          errorMessage: "forgejo-runner-k8s: .Values.runnerConfig is required. Provide the full runner.yaml — see examples/values-example.yaml."
+          errorMessage: "forgejo-runner: .Values.runnerConfig is required. Provide the full runner.yaml — see examples/values-example.yaml."
 
   - it: fails when forgejo.url is missing
     template: templates/deployment.tpl
@@ -86,4 +86,4 @@ tests:
       podSpecs: {a.yaml: "x"}
     asserts:
       - failedTemplate:
-          errorMessage: "forgejo-runner-k8s: .Values.forgejo.url is required."
+          errorMessage: "forgejo-runner: .Values.forgejo.url is required."

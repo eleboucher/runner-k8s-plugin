@@ -2,9 +2,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "forgejo-runner-k8s.fullname" . }}
+  name: {{ include "forgejo-runner.fullname" . }}
   labels:
-    {{- include "forgejo-runner-k8s.labels" . | nindent 4 }}
+    {{- include "forgejo-runner.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -22,15 +22,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "forgejo-runner-k8s.fullname" . }}
+  name: {{ include "forgejo-runner.fullname" . }}
   labels:
-    {{- include "forgejo-runner-k8s.labels" . | nindent 4 }}
+    {{- include "forgejo-runner.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "forgejo-runner-k8s.fullname" . }}
+  name: {{ include "forgejo-runner.fullname" . }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "forgejo-runner-k8s.serviceAccountName" . }}
+    name: {{ include "forgejo-runner.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

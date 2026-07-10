@@ -5,18 +5,18 @@ A backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) t
 ## Deploying
 
 The easiest way to run the full runner + plugin on Kubernetes is the Helm chart in
-[`charts/forgejo-runner-k8s`](charts/forgejo-runner-k8s), which runs the plugin as a
+[`charts/forgejo-runner`](charts/forgejo-runner), which runs the plugin as a
 native sidecar and wires up RBAC, config, and graceful shutdown for you:
 
 ```sh
-helm install forgejo-runner-k8s \
-  oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner-k8s \
+helm install forgejo-runner \
+  oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner \
   --namespace forgejo --create-namespace \
   -f my-values.yaml
 ```
 
-See the [chart README](charts/forgejo-runner-k8s/README.md) and
-[example values](charts/forgejo-runner-k8s/examples/values-example.yaml).
+See the [chart README](charts/forgejo-runner/README.md) and
+[example values](charts/forgejo-runner/examples/values-example.yaml).
 
 ## Building
 

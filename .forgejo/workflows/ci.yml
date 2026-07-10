@@ -50,7 +50,7 @@ jobs:
         run: helm plugin install https://github.com/helm-unittest/helm-unittest
 
       - name: Lint chart
-        run: helm lint charts/forgejo-runner-k8s -f charts/forgejo-runner-k8s/examples/values-example.yaml
+        run: helm lint charts/forgejo-runner -f charts/forgejo-runner/examples/values-example.yaml
 
       - name: Unit test chart
-        run: helm unittest charts/forgejo-runner-k8s
+        run: helm unittest charts/forgejo-runner

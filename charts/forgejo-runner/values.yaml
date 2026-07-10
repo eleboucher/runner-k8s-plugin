@@ -1,5 +1,5 @@
 ---
-# Default values for forgejo-runner-k8s.
+# Default values for forgejo-runner.
 
 # -- Number of runner replicas.
 replicaCount: 1

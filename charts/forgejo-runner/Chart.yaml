@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://json.schemastore.org/chart.json
 apiVersion: v2
-name: forgejo-runner-k8s
+name: forgejo-runner
 description: Forgejo Runner with the Kubernetes backend plugin, running the plugin as a native sidecar.
 type: application
 # version and appVersion are placeholders; the release workflow injects the git tag

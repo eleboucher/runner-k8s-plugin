@@ -112,14 +112,14 @@ jobs:
 
       - name: Package chart
         run: |
-          helm package charts/forgejo-runner-k8s \
+          helm package charts/forgejo-runner \
             --version "${{ steps.version.outputs.version }}" \
             --app-version "${{ steps.version.outputs.version }}"
 
       - name: Push chart
         id: push
         run: |
-          out=$(helm push "forgejo-runner-k8s-${{ steps.version.outputs.version }}.tgz" \
+          out=$(helm push "forgejo-runner-${{ steps.version.outputs.version }}.tgz" \
             oci://git.erwanleboucher.dev/${{ vars.USERNAME }}/charts 2>&1)
           echo "$out"
           echo "digest=$(echo "$out" | awk '/Digest:/ {print $2}')" >> "$GITHUB_OUTPUT"
@@ -137,4 +137,4 @@ jobs:
         run: |
           cosign login git.erwanleboucher.dev -u "${{ vars.USERNAME }}" -p "${{ secrets.OWNER_PACKAGE_SECRET }}"
           cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
-            "git.erwanleboucher.dev/${{ vars.USERNAME }}/charts/forgejo-runner-k8s@${{ steps.push.outputs.digest }}"
+            "git.erwanleboucher.dev/${{ vars.USERNAME }}/charts/forgejo-runner@${{ steps.push.outputs.digest }}"

@@ -1,10 +1,10 @@
 {{/* Chart name, overridable. */}}
-{{- define "forgejo-runner-k8s.name" -}}
+{{- define "forgejo-runner.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* Fully qualified app name. */}}
-{{- define "forgejo-runner-k8s.fullname" -}}
+{{- define "forgejo-runner.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -17,34 +17,34 @@
 {{- end }}
 {{- end }}
 
-{{- define "forgejo-runner-k8s.chart" -}}
+{{- define "forgejo-runner.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "forgejo-runner-k8s.labels" -}}
-helm.sh/chart: {{ include "forgejo-runner-k8s.chart" . }}
-{{ include "forgejo-runner-k8s.selectorLabels" . }}
+{{- define "forgejo-runner.labels" -}}
+helm.sh/chart: {{ include "forgejo-runner.chart" . }}
+{{ include "forgejo-runner.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{- define "forgejo-runner-k8s.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "forgejo-runner-k8s.name" . }}
+{{- define "forgejo-runner.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "forgejo-runner.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{- define "forgejo-runner-k8s.serviceAccountName" -}}
+{{- define "forgejo-runner.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "forgejo-runner-k8s.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "forgejo-runner.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
 
 {{/* Runner image reference; digest wins over tag. */}}
-{{- define "forgejo-runner-k8s.image" -}}
+{{- define "forgejo-runner.image" -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
 {{- else -}}
@@ -53,7 +53,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/* Plugin image reference; digest wins over tag, tag defaults to the chart appVersion. */}}
-{{- define "forgejo-runner-k8s.pluginImage" -}}
+{{- define "forgejo-runner.pluginImage" -}}
 {{- if .Values.plugin.image.digest -}}
 {{- printf "%s@%s" .Values.plugin.image.repository .Values.plugin.image.digest -}}
 {{- else -}}

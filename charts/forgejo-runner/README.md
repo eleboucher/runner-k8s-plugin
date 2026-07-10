@@ -1,4 +1,4 @@
-# forgejo-runner-k8s
+# forgejo-runner
 
 Forgejo Runner with the Kubernetes backend plugin, running the plugin as a native sidecar.
 
@@ -7,8 +7,8 @@ Forgejo Runner with the Kubernetes backend plugin, running the plugin as a nativ
 ## Installing
 
 ```sh
-helm install forgejo-runner-k8s \
-  oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner-k8s \
+helm install forgejo-runner \
+  oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner \
   --namespace forgejo --create-namespace \
   -f my-values.yaml
 ```

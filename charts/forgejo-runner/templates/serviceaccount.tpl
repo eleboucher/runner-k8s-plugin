@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "forgejo-runner-k8s.serviceAccountName" . }}
+  name: {{ include "forgejo-runner.serviceAccountName" . }}
   labels:
-    {{- include "forgejo-runner-k8s.labels" . | nindent 4 }}
+    {{- include "forgejo-runner.labels" . | nindent 4 }}
   {{- with .Values.serviceAccount.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}

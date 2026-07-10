@@ -1,5 +1,5 @@
 # Complete, working example. Copy the bits you need into your own values file:
-#   helm install my-runner oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner-k8s \
+#   helm install my-runner oci://git.erwanleboucher.dev/eleboucher/charts/forgejo-runner \
 #     -n forgejo -f my-values.yaml
 
 forgejo:
