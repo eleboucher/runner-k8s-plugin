@@ -2,7 +2,7 @@ module code.forgejo.org/forgejo/runner-k8s-plugin
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.27.0
 
 replace code.forgejo.org/forgejo/runner/v12 => git.erwanleboucher.dev/eleboucher/runner/v12 v12.13.0
 
