@@ -22,9 +22,7 @@ chart also grants the required RBAC.
 ## Requirements
 
 - Kubernetes **1.29+** (native sidecar support).
-- A runner image that supports the backend plugin protocol. Upstream forgejo-runner
-  does not yet; use the fork at `git.erwanleboucher.dev/eleboucher/runner`, matched to
-  a compatible plugin version.
+- Forgejo Runner v13.1.0 or newer, which supports the experimental backend plugin protocol.
 - An existing Secret with the runner registration `token` and `uuid`
   (`forgejo.existingSecret`).
 
@@ -49,8 +47,8 @@ as a starting point. Your `runnerConfig` must point `plugins.k8s.address` at
 | fullnameOverride | string | `""` | Override the full release name. |
 | image.digest | string | `""` | Pin the runner image by digest (`sha256:…`); when set, overrides the tag. |
 | image.pullPolicy | string | `"IfNotPresent"` | Runner image pull policy. |
-| image.repository | string | `"git.erwanleboucher.dev/eleboucher/runner"` | Runner image repository. |
-| image.tag | string | `""` | Runner image tag (REQUIRED). |
+| image.repository | string | `"data.forgejo.org/forgejo/runner"` | Runner image repository. |
+| image.tag | string | `"13.1.0"` | Runner image tag. |
 | imagePullSecrets | list | `[]` | Image pull secrets for private registries. |
 | nameOverride | string | `""` | Override the chart name used in resource names. |
 | nodeSelector | object | `{}` | Node selector. |
@@ -75,4 +73,3 @@ as a starting point. Your `runnerConfig` must point `plugins.k8s.address` at
 | serviceAccount.name | string | `""` | Name of the ServiceAccount; generated when empty. |
 | terminationGracePeriodSeconds | int | `300` | Termination grace period. Must cover `runner.shutdown_timeout` plus the plugin's ~60s cleanup budget. |
 | tolerations | list | `[]` | Tolerations. |
-

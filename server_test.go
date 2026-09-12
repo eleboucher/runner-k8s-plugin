@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -67,6 +68,12 @@ func TestK8sServer_NewServer_HasInstanceID(t *testing.T) {
 	s := newK8sServer()
 	assert.NotEmpty(t, s.pluginInstanceID)
 	assert.NotNil(t, s.envs)
+}
+
+func TestK8sServer_Capabilities(t *testing.T) {
+	response, err := newK8sServer().Capabilities(t.Context(), &pluginv1alpha.CapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "k8sjob", response.GetName())
 }
 
 func TestRunnerArch(t *testing.T) {

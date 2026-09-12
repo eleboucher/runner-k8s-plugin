@@ -14,14 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"code.forgejo.org/forgejo/runner/v12/act/container"
-	"code.forgejo.org/forgejo/runner/v12/act/plugin"
-	pluginv1 "code.forgejo.org/forgejo/runner/v12/act/plugin/proto/v1"
+	"code.forgejo.org/forgejo/runner/v13/act/container"
+	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
 	k8sexec "k8s.io/client-go/util/exec"
 	"sigs.k8s.io/yaml"
@@ -76,10 +74,11 @@ func runnerArch() string {
 type k8sEnvironment struct {
 	job    *K8sJob
 	config *K8sJobConfig
+	mu     sync.Mutex
 }
 
 type k8sServer struct {
-	pluginv1.UnimplementedBackendPluginServer
+	pluginv1alpha.UnimplementedBackendPluginServer
 
 	pluginInstanceID string
 
@@ -113,31 +112,13 @@ func (s *k8sServer) getEnv(id string) (*k8sEnvironment, error) {
 	return env, nil
 }
 
-func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1.CapabilitiesRequest) (*pluginv1.CapabilitiesResponse, error) {
-	return &pluginv1.CapabilitiesResponse{
-		ProtocolVersion:            plugin.ProtocolVersion,
-		Name:                       "k8sjob",
-		RootPath:                   k8sSharedMount,
-		ActPath:                    k8sActPath,
-		ToolCachePath:              k8sToolCache,
-		PathVariableName:           "PATH",
-		DefaultPathVariable:        k8sDefaultPath,
-		PathSeparator:              ":",
-		SupportsDockerActions:      false,
-		ManagesOwnNetworking:       true,
-		SupportsServiceContainers:  true,
-		EnvironmentCaseInsensitive: false,
-		SupportsLocalCopy:          true,
-		RunnerContext: map[string]string{
-			"os":         "Linux",
-			"arch":       runnerArch(),
-			"temp":       "/tmp",
-			"tool_cache": k8sToolCache,
-		},
+func (s *k8sServer) Capabilities(_ context.Context, _ *pluginv1alpha.CapabilitiesRequest) (*pluginv1alpha.CapabilitiesResponse, error) {
+	return &pluginv1alpha.CapabilitiesResponse{
+		Name: "k8sjob",
 	}, nil
 }
 
-func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*pluginv1.CreateResponse, error) {
+func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest) (*pluginv1alpha.CreateResponse, error) {
 	opts := req.GetBackendOptions()
 
 	namespace := opts["namespace"]
@@ -156,18 +137,22 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 		pollTimeout = 10 * time.Minute
 	}
 
-	var jobTimeout time.Duration
-	if v := opts["job_timeout"]; v != "" {
-		d, err := time.ParseDuration(v)
-		if err == nil {
-			jobTimeout = d
+	jobTimeout := req.GetEnvironmentTimeout().AsDuration()
+	if jobTimeout <= 0 {
+		// Keep the old option as a fallback for callers that do not yet send
+		// environment_timeout.
+		if v := opts["job_timeout"]; v != "" {
+			d, err := time.ParseDuration(v)
+			if err == nil {
+				jobTimeout = d
+			}
 		}
 	}
 	if jobTimeout == 0 {
 		jobTimeout = 3 * time.Hour
 	}
 
-	podSpec := opts["label_arg"]
+	podSpec := req.GetLabelArg()
 	if podSpec == "" {
 		podSpec = opts["podspec"]
 	}
@@ -199,12 +184,10 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	logWriter := &grpcLogWriter{stream: "create"}
 
 	job, err := NewK8sJob(&container.NewContainerInput{
-		Image:      req.GetImage(),
-		Name:       req.GetName(),
-		Env:        envMapToSlice(req.GetEnv()),
-		WorkingDir: req.GetWorkingDir(),
-		Stdout:     logWriter,
-		Stderr:     logWriter,
+		Image:  req.GetImage(),
+		Name:   req.GetName(),
+		Stdout: logWriter,
+		Stderr: logWriter,
 	}, k8sCfg)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create k8s job: %v", err)
@@ -232,22 +215,39 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1.CreateRequest) (*p
 	s.mu.Unlock()
 
 	slog.Info("created environment", "id", envID, "image", req.GetImage(), "namespace", namespace)
-	return &pluginv1.CreateResponse{EnvironmentId: envID}, nil
+	return &pluginv1alpha.CreateResponse{
+		EnvironmentId:              envID,
+		RootPath:                   k8sSharedMount,
+		ActPath:                    k8sActPath,
+		ToolCachePath:              k8sToolCache,
+		TempPath:                   "/tmp",
+		PathVariableName:           stringPtr("PATH"),
+		DefaultPathVariable:        stringPtr(k8sDefaultPath),
+		PathSeparator:              stringPtr(":"),
+		EnvironmentCaseInsensitive: false,
+		Os:                         "Linux",
+		Arch:                       runnerArch(),
+	}, nil
 }
 
-func (s *k8sServer) Start(ctx context.Context, req *pluginv1.StartRequest) (*pluginv1.StartResponse, error) {
+func (s *k8sServer) Start(req *pluginv1alpha.StartRequest, stream grpc.ServerStreamingServer[pluginv1alpha.StartOutput]) error {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
-		return nil, err
+		return err
+	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
+
+	if err := env.job.Start(false)(stream.Context()); err != nil {
+		return status.Errorf(codes.Internal, "job start: %v", err)
 	}
 
-	if err := env.job.Start(false)(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "job start: %v", err)
-	}
-
-	imageEnv := s.readContainerEnv(ctx, env)
-
-	return &pluginv1.StartResponse{ImageEnv: imageEnv}, nil
+	imageEnv := s.readContainerEnv(stream.Context(), env)
+	return stream.Send(&pluginv1alpha.StartOutput{
+		Output: &pluginv1alpha.StartOutput_StartComplete{
+			StartComplete: &pluginv1alpha.StartComplete{ImageEnv: imageEnv},
+		},
+	})
 }
 
 func (s *k8sServer) readContainerEnv(ctx context.Context, env *k8sEnvironment) map[string]string {
@@ -269,15 +269,17 @@ func (s *k8sServer) readContainerEnv(ctx context.Context, env *k8sEnvironment) m
 	return result
 }
 
-func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingServer[pluginv1.ExecOutput]) error {
+func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStreamingServer[pluginv1alpha.ExecOutput]) error {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
 
 	var mu sync.Mutex
-	stdoutW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDOUT}
-	stderrW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1.ExecOutput_STDERR}
+	stdoutW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1alpha.DataChunk_STDOUT}
+	stderrW := &execStreamWriter{mu: &mu, stream: stream, streamType: pluginv1alpha.DataChunk_STDERR}
 
 	var outW, errW io.Writer = stdoutW, stderrW
 	if s.logJobOutput {
@@ -291,42 +293,65 @@ func (s *k8sServer) Exec(req *pluginv1.ExecRequest, stream grpc.ServerStreamingS
 
 	execErr := env.job.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
 
-	exitCode := int32(0)
-	errorMsg := ""
 	if execErr != nil {
 		var ce k8sexec.CodeExitError
 		if errors.As(execErr, &ce) {
-			exitCode = int32(ce.Code)
-		} else {
-			exitCode = 1
-			errorMsg = execErr.Error()
+			mu.Lock()
+			defer mu.Unlock()
+			return stream.Send(&pluginv1alpha.ExecOutput{
+				Output: &pluginv1alpha.ExecOutput_ExecComplete{
+					ExecComplete: &pluginv1alpha.ExecComplete{ExitCode: int32(ce.Code)},
+				},
+			})
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		return stream.Send(&pluginv1alpha.ExecOutput{
+			Output: &pluginv1alpha.ExecOutput_ExecFailed{
+				ExecFailed: &pluginv1alpha.ExecFailed{ErrorMessage: execErr.Error()},
+			},
+		})
 	}
 
 	mu.Lock()
-	_ = stream.Send(&pluginv1.ExecOutput{
-		Done:         true,
-		ExitCode:     exitCode,
-		ErrorMessage: errorMsg,
+	defer mu.Unlock()
+	return stream.Send(&pluginv1alpha.ExecOutput{
+		Output: &pluginv1alpha.ExecOutput_ExecComplete{
+			ExecComplete: &pluginv1alpha.ExecComplete{},
+		},
 	})
-	mu.Unlock()
-
-	return nil
 }
 
-func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChunk, pluginv1.CopyInResponse]) error {
+func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1alpha.CopyInChunk, pluginv1alpha.CopyInResponse]) error {
 	first, err := stream.Recv()
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "copyin recv first: %v", err)
+	}
+	if first.EnvironmentId == nil || first.DestPath == nil {
+		return status.Error(codes.InvalidArgument, "copyin first chunk must set environment_id and dest_path")
 	}
 
 	env, err := s.getEnv(first.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
 
 	destPath := first.GetDestPath()
 	pr, pw := io.Pipe()
+	var recvErr error
+	var recvErrMu sync.Mutex
+	setRecvErr := func(err error) {
+		recvErrMu.Lock()
+		defer recvErrMu.Unlock()
+		recvErr = err
+	}
+	getRecvErr := func() error {
+		recvErrMu.Lock()
+		defer recvErrMu.Unlock()
+		return recvErr
+	}
 
 	go func() {
 		defer pw.Close()
@@ -345,6 +370,12 @@ func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChun
 				pw.CloseWithError(err)
 				return
 			}
+			if chunk.EnvironmentId != nil || chunk.DestPath != nil {
+				err := errors.New("copyin only permits environment_id and dest_path in the first chunk")
+				setRecvErr(err)
+				pw.CloseWithError(err)
+				return
+			}
 			if _, err := pw.Write(chunk.GetData()); err != nil {
 				pw.CloseWithError(err)
 				return
@@ -353,30 +384,25 @@ func (s *k8sServer) CopyIn(stream grpc.ClientStreamingServer[pluginv1.CopyInChun
 	}()
 
 	if err := env.job.CopyTarStream(stream.Context(), destPath, pr); err != nil {
+		if recvErr := getRecvErr(); recvErr != nil {
+			return status.Errorf(codes.InvalidArgument, "%v", recvErr)
+		}
 		return status.Errorf(codes.Internal, "copyin: %v", err)
 	}
-
-	return stream.SendAndClose(&pluginv1.CopyInResponse{})
-}
-
-func (s *k8sServer) CopyLocal(ctx context.Context, req *pluginv1.CopyLocalRequest) (*pluginv1.CopyLocalResponse, error) {
-	env, err := s.getEnv(req.GetEnvironmentId())
-	if err != nil {
-		return nil, err
+	if recvErr := getRecvErr(); recvErr != nil {
+		return status.Errorf(codes.InvalidArgument, "%v", recvErr)
 	}
 
-	if err := env.job.CopyDir(req.GetDestPath(), req.GetSrcPath(), false)(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "copylocal: %v", err)
-	}
-
-	return &pluginv1.CopyLocalResponse{}, nil
+	return stream.SendAndClose(&pluginv1alpha.CopyInResponse{})
 }
 
-func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStreamingServer[pluginv1.CopyOutChunk]) error {
+func (s *k8sServer) CopyOut(req *pluginv1alpha.CopyOutRequest, stream grpc.ServerStreamingServer[pluginv1alpha.CopyOutChunk]) error {
 	env, err := s.getEnv(req.GetEnvironmentId())
 	if err != nil {
 		return err
 	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
 
 	rc, err := env.job.GetContainerArchive(stream.Context(), req.GetSrcPath())
 	if err != nil {
@@ -388,7 +414,7 @@ func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStre
 	for {
 		n, readErr := rc.Read(buf)
 		if n > 0 {
-			if err := stream.Send(&pluginv1.CopyOutChunk{Data: buf[:n]}); err != nil {
+			if err := stream.Send(&pluginv1alpha.CopyOutChunk{Data: buf[:n]}); err != nil {
 				return err
 			}
 		}
@@ -402,43 +428,14 @@ func (s *k8sServer) CopyOut(req *pluginv1.CopyOutRequest, stream grpc.ServerStre
 	return nil
 }
 
-func (s *k8sServer) UpdateEnv(ctx context.Context, req *pluginv1.UpdateEnvRequest) (*pluginv1.UpdateEnvResponse, error) {
-	env, err := s.getEnv(req.GetEnvironmentId())
-	if err != nil {
-		return nil, err
-	}
-
-	current := req.GetCurrentEnv()
-	if current == nil {
-		current = make(map[string]string)
-	}
-	if err := env.job.UpdateFromEnv(req.GetSrcPath(), &current)(ctx); err != nil {
-		return nil, status.Errorf(codes.Internal, "updateenv: %v", err)
-	}
-
-	return &pluginv1.UpdateEnvResponse{UpdatedEnv: current}, nil
-}
-
-func (s *k8sServer) IsHealthy(ctx context.Context, req *pluginv1.IsHealthyRequest) (*pluginv1.IsHealthyResponse, error) {
-	env, err := s.getEnv(req.GetEnvironmentId())
-	if err != nil {
-		return nil, err
-	}
-
-	wait, err := env.job.IsHealthy(ctx)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "ishealthy: %v", err)
-	}
-
-	return &pluginv1.IsHealthyResponse{Wait: durationpb.New(wait)}, nil
-}
-
-func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*pluginv1.RemoveResponse, error) {
+func (s *k8sServer) Remove(ctx context.Context, req *pluginv1alpha.RemoveRequest) (*pluginv1alpha.RemoveResponse, error) {
 	envID := req.GetEnvironmentId()
 	env, err := s.getEnv(envID)
 	if err != nil {
 		return nil, err
 	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
 
 	if err := env.job.Remove()(ctx); err != nil {
 		slog.Warn("failed to remove environment", "id", envID, "error", err)
@@ -450,7 +447,7 @@ func (s *k8sServer) Remove(ctx context.Context, req *pluginv1.RemoveRequest) (*p
 	s.mu.Unlock()
 
 	slog.Info("removed environment", "id", envID)
-	return &pluginv1.RemoveResponse{}, nil
+	return &pluginv1alpha.RemoveResponse{}, nil
 }
 
 func (s *k8sServer) Shutdown(ctx context.Context) error {
@@ -499,16 +496,17 @@ func (s *k8sServer) Shutdown(ctx context.Context) error {
 
 type execStreamWriter struct {
 	mu         *sync.Mutex
-	stream     grpc.ServerStreamingServer[pluginv1.ExecOutput]
-	streamType pluginv1.ExecOutput_Stream
+	stream     grpc.ServerStreamingServer[pluginv1alpha.ExecOutput]
+	streamType pluginv1alpha.DataChunk_Stream
 }
 
 func (w *execStreamWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.stream.Send(&pluginv1.ExecOutput{
-		Stream: w.streamType,
-		Data:   p,
+	if err := w.stream.Send(&pluginv1alpha.ExecOutput{
+		Output: &pluginv1alpha.ExecOutput_Data{
+			Data: &pluginv1alpha.DataChunk{Stream: w.streamType, Data: p},
+		},
 	}); err != nil {
 		return 0, err
 	}
@@ -519,16 +517,6 @@ type grpcLogWriter struct {
 	stream string
 }
 
-// envMapToSlice converts the proto env map (map<string,string>) into the
-// []string "K=V" form expected by container.NewContainerInput.
-func envMapToSlice(env map[string]string) []string {
-	out := make([]string, 0, len(env))
-	for k, v := range env {
-		out = append(out, k+"="+v)
-	}
-	return out
-}
-
 func (w *grpcLogWriter) Write(p []byte) (int, error) {
 	// Check the level before string(p): this is on the per-chunk Exec path.
 	if len(p) > 0 && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -537,8 +525,12 @@ func (w *grpcLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func stringPtr(v string) *string {
+	return &v
+}
+
 var (
-	_ pluginv1.BackendPluginServer = (*k8sServer)(nil)
-	_ io.Writer                    = (*execStreamWriter)(nil)
-	_ io.Writer                    = (*grpcLogWriter)(nil)
+	_ pluginv1alpha.BackendPluginServer = (*k8sServer)(nil)
+	_ io.Writer                         = (*execStreamWriter)(nil)
+	_ io.Writer                         = (*grpcLogWriter)(nil)
 )

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"code.forgejo.org/forgejo/runner/v12/act/container"
+	"code.forgejo.org/forgejo/runner/v13/act/container"
 )
 
 const (

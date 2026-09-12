@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	pluginv1 "code.forgejo.org/forgejo/runner/v12/act/plugin/proto/v1"
+	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -40,7 +40,7 @@ func main() {
 	)
 
 	k8sSrv := newK8sServer()
-	pluginv1.RegisterBackendPluginServer(srv, k8sSrv)
+	pluginv1alpha.RegisterBackendPluginServer(srv, k8sSrv)
 
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(srv, healthSrv)
@@ -90,12 +90,10 @@ func listenOn(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
 
-// configureLogging sets the slog default handler. The runner spawns this
-// plugin via hashicorp/go-plugin, which has no built-in mechanism to
-// propagate its log level to the child process. To stay aligned with the
-// runner's level, the runner is expected to inject FORGEJO_RUNNER_LOG_LEVEL
-// (or HCLOG_LEVEL as a fallback) into the plugin's environment. When
-// neither is set we default to Info, matching the runner's own default.
+// configureLogging sets the slog default handler. To stay aligned with the
+// runner's level, deployments can inject FORGEJO_RUNNER_LOG_LEVEL (or
+// HCLOG_LEVEL as a fallback) into the plugin's environment. When neither is
+// set we default to Info, matching the runner's own default.
 func configureLogging() {
 	level := slog.LevelInfo
 	for _, key := range []string{"FORGEJO_RUNNER_LOG_LEVEL", "HCLOG_LEVEL"} {

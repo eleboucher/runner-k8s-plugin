@@ -25,9 +25,11 @@ See the [chart README](charts/forgejo-runner/README.md) and
 
 ## Configuration
 
-The plugin supports two transport modes. In both cases, labels use the plugin scheme name (`k8s` below) and the runner routes jobs to the matching config.
+Forgejo Runner v13.1.0 connects to the plugin over a Unix socket or TCP. Labels
+use the plugin scheme name (`k8s` below), and the runner routes jobs to the
+matching configuration.
 
-### v1: standalone gRPC server
+### Forgejo Runner v13.1.0+
 
 The plugin runs as a sidecar process. The runner connects over a Unix socket or TCP.
 
@@ -43,18 +45,6 @@ plugins:
       namespace: ci-jobs
 ```
 
-### v2: go-plugin (binary launch)
-
-The runner launches the plugin binary as a subprocess via [go-plugin](https://github.com/hashicorp/go-plugin). No sidecar or socket needed. The binary auto-detects how it was launched.
-
-```yaml
-pluginsv2:
-  k8s:
-    path: /usr/local/bin/forgejo-runner-k8s
-    options:
-      namespace: ci-jobs
-```
-
 ### Labels
 
 ```yaml
@@ -63,13 +53,13 @@ server:
     main:
       url: https://forgejo.example.com
       labels:
-        - "ubuntu-k8s:k8s://config/podspec-default.yaml"
-        - "gpu:k8s://config/podspec-gpu.yaml"
+        - "ubuntu-k8s:k8s:///config/podspec-default.yaml"
+        - "gpu:k8s:///config/podspec-gpu.yaml"
 ```
 
 ### Backend options
 
-Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
+Set in `plugins.<name>.options`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -81,24 +71,18 @@ Set in `plugins.<name>.options` or `pluginsv2.<name>.options`:
 | `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
 | `resources` | — | Inline YAML `ResourceRequirements` applied to any container (init or regular) that doesn't declare its own. Mainly covers service containers, which otherwise carry no resources. PodSpec resources are kept as-is. |
 
-The runner also injects `label_arg` (per-job label argument, e.g. PodSpec path) and `job_timeout` automatically.
+Forgejo Runner sends the per-job PodSpec path as `label_arg` and the job lifetime
+as `environment_timeout` in its `Create` request.
 
 Pods always carry `app.kubernetes.io/managed-by=forgejo-runner`, `forgejo-runner/environment-id`, and `forgejo-runner/plugin-instance`. Use `labels` for anything else:
 
 ```yaml
-# v1
 plugins:
   k8s:
     address: "unix:///var/run/forgejo-runner-k8s.sock"
     options:
       labels: "app.kubernetes.io/name=forgejo-runner,app.kubernetes.io/instance=runner-${ENV_ID}"
 
-# v2
-pluginsv2:
-  k8s:
-    path: /usr/local/bin/forgejo-runner-k8s
-    options:
-      labels: "app.kubernetes.io/name=forgejo-runner,app.kubernetes.io/instance=runner-${ENV_ID}"
 ```
 
 ## Logging
@@ -126,10 +110,10 @@ nodeSelector:
 
 ## Migrating from the in-tree backend
 
-The in-tree `k8spod` backend continues to work. To switch to this plugin:
+To switch from the old in-tree `k8spod` backend:
 
-1. Deploy the plugin (sidecar for v1, or copy the binary for v2)
-2. Change labels from `mylabel:k8spod://podspec.yaml` to `mylabel:k8s://podspec.yaml`
+1. Deploy the plugin as a sidecar or another reachable gRPC service.
+2. Change labels from `mylabel:k8spod://podspec.yaml` to `mylabel:k8s:///podspec.yaml`
 3. Add the plugin section to the runner config
 
 ## Testing

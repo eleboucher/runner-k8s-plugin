@@ -21,14 +21,13 @@ forgejo:
     # -- Key within the Secret holding the runner UUID.
     uuid: uuid
 
-# Runner image. MUST be a forgejo-runner build that supports the Kubernetes backend plugin
-# (currently the fork at git.erwanleboucher.dev/eleboucher/runner). Keep the tag compatible
-# with the plugin version below.
+# Runner image. Forgejo Runner v13.1.0+ supports the experimental Kubernetes
+# backend plugin protocol. Keep the tag compatible with the plugin version below.
 image:
   # -- Runner image repository.
-  repository: git.erwanleboucher.dev/eleboucher/runner
-  # -- Runner image tag (REQUIRED).
-  tag: ""
+  repository: data.forgejo.org/forgejo/runner
+  # -- Runner image tag.
+  tag: "13.1.0"
   # -- Pin the runner image by digest (`sha256:…`); when set, overrides the tag.
   digest: ""
   # -- Runner image pull policy.

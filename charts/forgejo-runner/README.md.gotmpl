@@ -22,9 +22,7 @@ chart also grants the required RBAC.
 ## Requirements
 
 - Kubernetes **1.29+** (native sidecar support).
-- A runner image that supports the backend plugin protocol. Upstream forgejo-runner
-  does not yet; use the fork at `git.erwanleboucher.dev/eleboucher/runner`, matched to
-  a compatible plugin version.
+- Forgejo Runner v13.1.0 or newer, which supports the experimental backend plugin protocol.
 - An existing Secret with the runner registration `token` and `uuid`
   (`forgejo.existingSecret`).
 
