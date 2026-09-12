@@ -843,11 +843,11 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 	}
 
 	lw := &cache.ListWatch{
-		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
 			return p.client.CoreV1().Pods(p.namespace).List(ctx, opts)
 		},
-		WatchFunc: func(opts metav1.ListOptions) (metav1watch.Interface, error) {
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (metav1watch.Interface, error) {
 			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
 			return p.client.CoreV1().Pods(p.namespace).Watch(ctx, opts)
 		},
