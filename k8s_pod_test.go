@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +21,7 @@ import (
 	clientfeaturestesting "k8s.io/client-go/features/testing"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 var (
@@ -843,99 +844,6 @@ type testWriter struct{}
 
 func (testWriter) Write(p []byte) (int, error) { return len(p), nil }
 
-func TestSpillWriter_StaysInMemory(t *testing.T) {
-	buf := new(bytes.Buffer)
-	sw := &spillWriter{
-		buf:       buf,
-		threshold: 100,
-	}
-
-	// Write well under threshold
-	n, err := sw.Write([]byte("hello world"))
-	require.NoError(t, err)
-	assert.Equal(t, 11, n)
-	assert.Nil(t, sw.tmp)
-	assert.Equal(t, int64(11), sw.written)
-}
-
-func TestSpillWriter_SpillsToTempFile(t *testing.T) {
-	buf := new(bytes.Buffer)
-	sw := &spillWriter{
-		buf:       buf,
-		threshold: 100,
-	}
-
-	// Fill past threshold
-	data := make([]byte, 150)
-	for i := range data {
-		data[i] = byte(i % 256)
-	}
-	n, err := sw.Write(data)
-	require.NoError(t, err)
-	assert.Equal(t, 150, n)
-	assert.NotNil(t, sw.tmp)
-
-	// Verify data landed in temp file
-	content, err := os.ReadFile(sw.tmp.Name())
-	require.NoError(t, err)
-	assert.Equal(t, 150, len(content))
-}
-
-func TestSpillWriter_PartialSpill(t *testing.T) {
-	buf := new(bytes.Buffer)
-	sw := &spillWriter{
-		buf:       buf,
-		threshold: 100,
-	}
-
-	// Write first chunk (under threshold)
-	_, err := sw.Write([]byte("first chunk - "))
-	require.NoError(t, err)
-	assert.Nil(t, sw.tmp)
-
-	// Write chunk that pushes past threshold
-	n2, err := sw.Write(make([]byte, 90))
-	require.NoError(t, err)
-	assert.Equal(t, 90, n2)
-	assert.NotNil(t, sw.tmp)
-
-	// Verify buffered content is in temp file
-	content, err := os.ReadFile(sw.tmp.Name())
-	require.NoError(t, err)
-	assert.Contains(t, string(content), "first chunk")
-}
-
-func TestTempFileReader_CloseRemovesFile(t *testing.T) {
-	tmp, err := os.CreateTemp(t.TempDir(), "test-archive-*.tar")
-	require.NoError(t, err)
-	path := tmp.Name()
-	_, err = tmp.Write([]byte("test data"))
-	require.NoError(t, err)
-	require.NoError(t, tmp.Close())
-
-	f, err := os.OpenFile(path, os.O_RDONLY, 0o644)
-	require.NoError(t, err)
-	reader := &tempFileReader{tmp: f}
-	require.NoError(t, reader.Close())
-
-	// File should be gone
-	_, err = os.Stat(path)
-	assert.True(t, os.IsNotExist(err))
-}
-
-func TestTempFileReader_CloseReturnsReadError(t *testing.T) {
-	tmp, err := os.CreateTemp(t.TempDir(), "test-archive-*.tar")
-	require.NoError(t, err)
-	_, err = tmp.Write([]byte("test data"))
-	require.NoError(t, err)
-	require.NoError(t, tmp.Close())
-	os.Remove(tmp.Name())
-
-	// Trying to create reader on deleted file — close should still succeed
-	reader := &tempFileReader{tmp: nil}
-	assert.NoError(t, reader.Close())
-}
-
 func TestIsClosedStreamError(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1121,4 +1029,74 @@ func TestK8sJob_CreateJob_NoImagePullPolicyByDefault(t *testing.T) {
 	job, err := p.createJob(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, job.Spec.Template.Spec.Containers[0].ImagePullPolicy)
+}
+
+type fakeExecutor struct {
+	stdout string
+	stderr string
+	err    error
+}
+
+func (f fakeExecutor) Stream(opts remotecommand.StreamOptions) error {
+	return f.StreamWithContext(context.Background(), opts)
+}
+
+func (f fakeExecutor) StreamWithContext(_ context.Context, opts remotecommand.StreamOptions) error {
+	if opts.Stdout != nil && f.stdout != "" {
+		if _, err := io.WriteString(opts.Stdout, f.stdout); err != nil {
+			return err
+		}
+	}
+	if opts.Stderr != nil && f.stderr != "" {
+		if _, err := io.WriteString(opts.Stderr, f.stderr); err != nil {
+			return err
+		}
+	}
+	return f.err
+}
+
+func TestStreamArchive_StreamsStdout(t *testing.T) {
+	pr, pw := io.Pipe()
+	go streamArchive(context.Background(), fakeExecutor{stdout: "tar-bytes"}, pw)
+
+	got, err := io.ReadAll(pr)
+	require.NoError(t, err)
+	assert.Equal(t, "tar-bytes", string(got))
+}
+
+func TestStreamArchive_SurfacesErrorOnReader(t *testing.T) {
+	pr, pw := io.Pipe()
+	exec := fakeExecutor{stdout: "partial", stderr: "tar: no such file", err: errors.New("exit 2")}
+	go streamArchive(context.Background(), exec, pw)
+
+	_, err := io.ReadAll(pr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exit 2")
+	assert.Contains(t, err.Error(), "tar: no such file")
+}
+
+func TestStreamArchive_ClosedStreamErrorIsRecognised(t *testing.T) {
+	pr, pw := io.Pipe()
+	exec := fakeExecutor{err: errors.New("use of closed network connection")}
+	go streamArchive(context.Background(), exec, pw)
+
+	_, err := io.ReadAll(pr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "container may have terminated")
+}
+
+func TestStreamArchive_ReaderCloseUnblocksProducer(t *testing.T) {
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		streamArchive(context.Background(), fakeExecutor{stdout: strings.Repeat("x", 1<<20)}, pw)
+		close(done)
+	}()
+
+	require.NoError(t, pr.Close())
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamArchive did not return after the reader closed")
+	}
 }

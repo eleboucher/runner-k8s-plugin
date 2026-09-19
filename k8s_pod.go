@@ -311,86 +311,6 @@ func (p *K8sJob) CopyTarStream(ctx context.Context, destPath string, tarStream i
 	return p.execTarExtract(ctx, destPath, pr)
 }
 
-// archiveBufferLimit is the threshold at which GetContainerArchive switches
-// from memory buffering to spilling to a temp file.
-const archiveBufferLimit = 50 * 1024 * 1024 // 50MB
-
-// tempFileReader wraps an open temp file for reading as an io.ReadCloser.
-// The file is removed when Close is called.
-type tempFileReader struct {
-	tmp *os.File
-}
-
-func (r *tempFileReader) Read(p []byte) (int, error) {
-	return r.tmp.Read(p)
-}
-
-func (r *tempFileReader) Close() error {
-	if r.tmp == nil {
-		return nil
-	}
-	name := r.tmp.Name()
-	err := r.tmp.Close()
-	removeErr := os.Remove(name)
-	r.tmp = nil
-	if err == nil {
-		err = removeErr
-	}
-	return err
-}
-
-// spillWriter writes to a buffer initially, then spills to a temp file once
-// the threshold is exceeded. This allows GetContainerArchive to handle both
-// small and large archives without OOM for small ones while streaming large
-// ones to disk instead of memory.
-type spillWriter struct {
-	buf       *bytes.Buffer
-	tmp       *os.File
-	threshold int64
-	written   int64
-}
-
-func (s *spillWriter) Write(p []byte) (int, error) {
-	if s.tmp != nil {
-		n, err := s.tmp.Write(p)
-		s.written += int64(n)
-		return n, err
-	}
-	if s.written+int64(len(p)) > s.threshold {
-		if err := s.spillToDisk(p); err != nil {
-			return 0, err
-		}
-		return len(p), nil
-	}
-	n, err := s.buf.Write(p)
-	s.written += int64(n)
-	return n, err
-}
-
-func (s *spillWriter) spillToDisk(firstChunk []byte) error {
-	tmp, err := os.CreateTemp("", "forgejo-archive-*.tar")
-	if err != nil {
-		return fmt.Errorf("create temp file for archive overflow: %w", err)
-	}
-	s.tmp = tmp
-	if _, err := s.buf.WriteTo(tmp); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		s.tmp = nil
-		return fmt.Errorf("spill buffer to temp file: %w", err)
-	}
-	if len(firstChunk) > 0 {
-		if _, err := tmp.Write(firstChunk); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
-			s.tmp = nil
-			return fmt.Errorf("write first chunk after spill: %w", err)
-		}
-		s.written += int64(len(firstChunk))
-	}
-	return nil
-}
-
 func (p *K8sJob) GetContainerArchive(ctx context.Context, srcPath string) (io.ReadCloser, error) {
 	dir := filepath.Dir(srcPath)
 	base := filepath.Base(srcPath)
@@ -405,34 +325,27 @@ func (p *K8sJob) GetContainerArchive(ctx context.Context, srcPath string) (io.Re
 		return nil, fmt.Errorf("setup tar exec: %w", err)
 	}
 
-	sw := &spillWriter{
-		buf:       new(bytes.Buffer),
-		threshold: archiveBufferLimit,
-	}
-	var errBuf bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: sw,
-		Stderr: &errBuf,
-	}); err != nil {
-		if sw.tmp != nil {
-			sw.tmp.Close()
-			os.Remove(sw.tmp.Name())
-		}
-		if isClosedStreamError(err) {
-			return nil, fmt.Errorf("tar exec: stream closed (container may have terminated)")
-		}
-		return nil, fmt.Errorf("tar exec: %w (stderr: %s)", err, errBuf.String())
-	}
+	pr, pw := io.Pipe()
+	go streamArchive(ctx, exec, pw)
+	return pr, nil
+}
 
-	if sw.tmp != nil {
-		if _, err := sw.tmp.Seek(0, 0); err != nil {
-			sw.tmp.Close()
-			os.Remove(sw.tmp.Name())
-			return nil, fmt.Errorf("seek temp file: %w", err)
-		}
-		return &tempFileReader{tmp: sw.tmp}, nil
+// streamArchive pipes the exec's stdout to pw. A tar failure reaches the
+// reader as a close error, since bytes may already have been delivered.
+func streamArchive(ctx context.Context, exec remotecommand.Executor, pw *io.PipeWriter) {
+	var errBuf bytes.Buffer
+	err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: pw,
+		Stderr: &errBuf,
+	})
+	switch {
+	case err == nil:
+		pw.Close()
+	case isClosedStreamError(err):
+		pw.CloseWithError(errors.New("tar exec: stream closed (container may have terminated)"))
+	default:
+		pw.CloseWithError(fmt.Errorf("tar exec: %w (stderr: %s)", err, errBuf.String()))
 	}
-	return io.NopCloser(bytes.NewReader(sw.buf.Bytes())), nil
 }
 
 func (p *K8sJob) Pull(_ bool) common.Executor {
