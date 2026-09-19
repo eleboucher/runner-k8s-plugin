@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.0
 
 require (
-	code.forgejo.org/forgejo/runner/v13 v13.1.0
+	code.forgejo.org/forgejo/runner/v13 v13.2.0
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.83.2
@@ -44,7 +44,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
