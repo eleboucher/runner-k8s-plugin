@@ -27,7 +27,7 @@ image:
   # -- Runner image repository.
   repository: data.forgejo.org/forgejo/runner
   # -- Runner image tag.
-  tag: "13.1.0"
+  tag: "13.2.0"
   # -- Pin the runner image by digest (`sha256:…`); when set, overrides the tag.
   digest: ""
   # -- Runner image pull policy.
