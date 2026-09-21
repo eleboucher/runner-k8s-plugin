@@ -1,5 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>eleboucher/renovate-config"],
+  "extends": [
+    "local>eleboucher/renovate-config",
+    "group:allNonMajor"
+  ],
   "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"]
 }
