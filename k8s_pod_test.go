@@ -5,7 +5,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -746,6 +750,47 @@ func TestK8sJob_CreateJob_JobTimeoutPropagation(t *testing.T) {
 	job, err := p.createJob(t.Context())
 	require.NoError(t, err)
 	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Command[2], "sleep 1810")
+}
+
+func TestK8sJob_CreateJob_TTLAfterFinished(t *testing.T) {
+	p := newTestK8sJob(t, fake.NewSimpleClientset())
+
+	job, err := p.createJob(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, job.Spec.TTLSecondsAfterFinished)
+	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
+}
+
+func TestKillExecScript_KillsTaggedProcessTree(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("script relies on /proc")
+	}
+	marker := execIDEnv + "=test-" + strconv.Itoa(os.Getpid())
+
+	tagged := exec.Command("sh", "-c", "sleep 60 & wait")
+	tagged.Env = append(os.Environ(), marker)
+	require.NoError(t, tagged.Start())
+	taggedDone := make(chan error, 1)
+	go func() { taggedDone <- tagged.Wait() }()
+
+	untagged := exec.Command("sleep", "60")
+	require.NoError(t, untagged.Start())
+	t.Cleanup(func() {
+		_ = untagged.Process.Kill()
+		_ = untagged.Wait()
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	out, err := exec.Command("sh", "-c", killExecScript, "sh", marker).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	select {
+	case <-taggedDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tagged process still running")
+	}
+	assert.NoError(t, untagged.Process.Signal(syscall.Signal(0)), "untagged process was killed")
 }
 
 func TestK8sJob_CreateJob_DefaultTimeout(t *testing.T) {

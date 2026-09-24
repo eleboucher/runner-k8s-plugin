@@ -20,6 +20,7 @@ import (
 
 	"code.forgejo.org/forgejo/runner/v13/act/common"
 	"code.forgejo.org/forgejo/runner/v13/act/container"
+	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -186,7 +187,8 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 		// env(1) handles variable names with dashes (e.g. INPUT_SHOW-PROGRESS)
 		// that POSIX export rejects. env -C is not portable (missing in BusyBox),
 		// so workdir uses sh+cd instead.
-		envcmd := []string{"env"}
+		execID := uuid.NewString()
+		envcmd := []string{"env", execIDEnv + "=" + execID}
 		for k, v := range env {
 			envcmd = append(envcmd, k+"="+v)
 		}
@@ -222,10 +224,52 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 			Stderr: stderr,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				p.killExec(context.WithoutCancel(ctx), execID)
+			}
 			return fmt.Errorf("exec: %w", err)
 		}
 
 		return nil
+	}
+}
+
+// execIDEnv tags Exec processes so a cancelled command can be killed:
+// closing a Kubernetes exec stream leaves the remote process running.
+const execIDEnv = "FORGEJO_RUNNER_K8S_EXEC_ID"
+
+const killExecScript = `marker=$1
+signal() {
+	hit=1
+	for f in /proc/[0-9]*/environ; do
+		tr '\0' '\n' 2>/dev/null <"$f" | grep -qxF "$marker" || continue
+		pid=${f#/proc/}
+		kill "-$1" "${pid%/environ}" 2>/dev/null && hit=0
+	done
+	return "$hit"
+}
+signal TERM || exit 0
+i=0
+while [ "$i" -lt 10 ] && signal 0; do sleep 1; i=$((i + 1)); done
+signal KILL || true
+`
+
+func (p *K8sJob) killExec(ctx context.Context, execID string) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	exec, err := p.newExecCommand(p.podName, &corev1.PodExecOptions{
+		Container: k8sMainContainerName,
+		Command:   []string{"sh", "-c", killExecScript, "sh", execIDEnv + "=" + execID},
+		Stderr:    true,
+	})
+	if err != nil {
+		slog.Warn("failed to kill cancelled exec", "pod", p.podName, "exec_id", execID, "error", err)
+		return
+	}
+	var errBuf bytes.Buffer
+	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stderr: &errBuf}); err != nil {
+		slog.Warn("failed to kill cancelled exec", "pod", p.podName, "exec_id", execID, "error", err, "stderr", errBuf.String())
 	}
 }
 
@@ -592,6 +636,8 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 	*job.Spec.Parallelism = 1
 	job.Spec.ActiveDeadlineSeconds = new(int64)
 	*job.Spec.ActiveDeadlineSeconds = int64(timeout.Seconds())
+	// Collects Jobs orphaned by a plugin instance that never called Remove.
+	job.Spec.TTLSecondsAfterFinished = ptr.To[int32](600)
 
 	created, err := p.client.BatchV1().Jobs(p.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {

@@ -294,6 +294,9 @@ func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStrea
 	execErr := env.job.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
 
 	if execErr != nil {
+		if err := stream.Context().Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
 		var ce k8sexec.CodeExitError
 		if errors.As(execErr, &ce) {
 			mu.Lock()
