@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -18,8 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	clientfeatures "k8s.io/client-go/features"
 	clientfeaturestesting "k8s.io/client-go/features/testing"
@@ -319,6 +322,8 @@ func TestK8sJob_CreateJob_MissingPodSpecFile(t *testing.T) {
 }
 
 func TestK8sJob_WaitForJobRunning(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
 		Status:     batchv1.JobStatus{},
@@ -340,6 +345,8 @@ func TestK8sJob_WaitForJobRunning(t *testing.T) {
 }
 
 func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
 		Status:     batchv1.JobStatus{},
@@ -371,6 +378,8 @@ func TestK8sJob_WaitForJobRunning_JobFailed(t *testing.T) {
 }
 
 func TestK8sJob_WaitForJobRunning_JobDeleted(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
 		Status:     batchv1.JobStatus{},
@@ -391,6 +400,8 @@ func TestK8sJob_WaitForJobRunning_JobDeleted(t *testing.T) {
 }
 
 func TestK8sJob_WaitForJobRunning_Timeout(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
 		Status:     batchv1.JobStatus{},
@@ -413,6 +424,8 @@ func TestK8sJob_WaitForJobRunning_Timeout(t *testing.T) {
 }
 
 func TestK8sJob_WaitForJobRunning_AlreadyRunningOnGet(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
 		Status:     batchv1.JobStatus{Active: 1},
@@ -420,6 +433,31 @@ func TestK8sJob_WaitForJobRunning_AlreadyRunningOnGet(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset(job)
 	p := newTestK8sJob(t, fakeClient)
 	require.NoError(t, p.waitForJobRunning(t.Context(), job))
+}
+
+func TestK8sJob_WaitForJobRunning_TransientAPIError(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	fakeClient := fake.NewSimpleClientset(job)
+	var failed atomic.Bool
+	failOnce := func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if failed.CompareAndSwap(false, true) {
+			return true, nil, apierrors.NewTimeoutError("request timed out", 1)
+		}
+		return false, nil, nil
+	}
+	fakeClient.PrependReactor("get", "jobs", failOnce)
+	fakeClient.PrependReactor("list", "jobs", failOnce)
+
+	p := newTestK8sJob(t, fakeClient)
+	p.config.PollTimeout = 10 * time.Second
+
+	require.NoError(t, p.waitForJobRunning(t.Context(), job))
+	assert.True(t, failed.Load())
 }
 
 func TestK8sJob_DeleteJob(t *testing.T) {

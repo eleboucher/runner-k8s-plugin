@@ -721,58 +721,36 @@ func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error 
 		defer cancel()
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		current, err := p.client.BatchV1().Jobs(p.namespace).Get(ctx, job.Name, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return errors.New("job was deleted while waiting for it to start")
-			}
-			return fmt.Errorf("get job status: %w", err)
-		}
-		if done, err := jobStartedOrTerminal(current); done {
-			return err
-		}
-
-		watcher, err := p.client.BatchV1().Jobs(p.namespace).Watch(ctx, metav1.ListOptions{
-			FieldSelector:   "metadata.name=" + job.Name,
-			ResourceVersion: current.ResourceVersion,
-		})
-		if err != nil {
-			return fmt.Errorf("watch job: %w", err)
-		}
-		defer watcher.Stop()
-
-		_, err = watch.UntilWithoutRetry(ctx, watcher, func(event metav1watch.Event) (bool, error) {
-			if event.Type == metav1watch.Deleted {
-				return true, errors.New("job was deleted while waiting for it to start")
-			}
-			watchedJob, ok := event.Object.(*batchv1.Job)
-			if !ok {
-				return false, nil
-			}
-			return jobStartedOrTerminal(watchedJob)
-		})
-		if err != nil {
-			if errors.Is(err, watch.ErrWatchClosed) {
-				if ctx.Err() != nil {
-					return errors.New("timeout waiting for job to become ready")
-				}
-				slog.Debug("watch channel closed, retrying", "job", job.Name)
-				continue
-			}
-			if ctx.Err() != nil {
-				return errors.New("timeout waiting for job to become ready")
-			}
-			return err
-		}
-		return nil
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+			opts.FieldSelector = "metadata.name=" + job.Name
+			return p.client.BatchV1().Jobs(p.namespace).List(ctx, opts)
+		},
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (metav1watch.Interface, error) {
+			opts.FieldSelector = "metadata.name=" + job.Name
+			return p.client.BatchV1().Jobs(p.namespace).Watch(ctx, opts)
+		},
 	}
+	exists := func(store cache.Store) (bool, error) {
+		if _, ok, err := store.GetByKey(p.namespace + "/" + job.Name); err != nil || ok {
+			return false, err
+		}
+		return true, errors.New("job was deleted while waiting for it to start")
+	}
+	_, err := watch.UntilWithSync(ctx, lw, &batchv1.Job{}, exists, func(event metav1watch.Event) (bool, error) {
+		if event.Type == metav1watch.Deleted {
+			return true, errors.New("job was deleted while waiting for it to start")
+		}
+		watchedJob, ok := event.Object.(*batchv1.Job)
+		if !ok {
+			return false, nil
+		}
+		return jobStartedOrTerminal(watchedJob)
+	})
+	if wait.Interrupted(err) {
+		return errors.New("timeout waiting for job to become ready")
+	}
+	return err
 }
 
 func jobStartedOrTerminal(job *batchv1.Job) (bool, error) {
