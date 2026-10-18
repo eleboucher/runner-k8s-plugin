@@ -130,36 +130,69 @@ func TestK8sJob_CreateJob_WithCapabilities(t *testing.T) {
 	assert.Contains(t, main.SecurityContext.Capabilities.Drop, corev1.Capability("ALL"))
 }
 
-func TestK8sJob_CreateJob_WithServiceContainers(t *testing.T) {
+func TestK8sJob_CreateJob_ServiceHostAliases(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset()
 	p := newTestK8sJob(t, fakeClient)
-	p.AddServiceContainerRaw("redis", "redis:7", map[string]string{"REDIS_PASS": "secret"}, []string{"6379"})
-	p.AddServiceContainerRaw("postgres", "postgres:16", map[string]string{"POSTGRES_DB": "test"}, []string{"5432:5432"})
+	p.serviceIPs = map[string]string{"a": "10.0.0.1", "b": "10.0.0.2"}
 
 	job, err := p.createJob(t.Context())
 	require.NoError(t, err)
 
-	assert.Len(t, job.Spec.Template.Spec.Containers, 3)
+	assert.Len(t, job.Spec.Template.Spec.Containers, 1)
+	assert.Equal(t, []corev1.HostAlias{
+		{IP: "10.0.0.1", Hostnames: []string{"a"}},
+		{IP: "10.0.0.2", Hostnames: []string{"b"}},
+	}, job.Spec.Template.Spec.HostAliases)
+}
 
-	redis := job.Spec.Template.Spec.Containers[1]
-	assert.Equal(t, "redis", redis.Name)
-	assert.Equal(t, "redis:7", redis.Image)
-	assert.Len(t, redis.Ports, 1)
-	assert.Equal(t, int32(6379), redis.Ports[0].ContainerPort)
+func TestK8sJob_CreateServiceJob(t *testing.T) {
+	tmpFile := t.TempDir() + "/podspec.yaml"
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`containers:
+  - name: main
+    image: custom-image:latest
+nodeSelector:
+  gpu: "true"
+`), 0o644))
 
-	foundMount := false
-	for _, m := range redis.VolumeMounts {
-		if m.Name == "shared" && m.MountPath == k8sSharedMount {
-			foundMount = true
-		}
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sJob(t, fakeClient)
+	p.config.PodSpec = tmpFile
+	p.extraLabels = map[string]string{"forgejo-runner/environment-id": "env1"}
+	p.config.Resources = &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 	}
-	assert.True(t, foundMount)
+	p.AddServiceContainerRaw("redis", "redis:7", map[string]string{"A": "b"}, []string{"6379"})
 
-	require.NotEmpty(t, job.Spec.Template.Spec.HostAliases)
-	alias := job.Spec.Template.Spec.HostAliases[0]
-	assert.Equal(t, "127.0.0.1", alias.IP)
-	assert.Contains(t, alias.Hostnames, "redis")
-	assert.Contains(t, alias.Hostnames, "postgres")
+	job, err := p.createServiceJob(t.Context(), p.services[0])
+	require.NoError(t, err)
+
+	spec := job.Spec.Template.Spec
+	require.Len(t, spec.Containers, 1)
+	assert.Equal(t, "redis", spec.Containers[0].Name)
+	assert.Equal(t, "redis:7", spec.Containers[0].Image)
+	assert.Equal(t, int32(6379), spec.Containers[0].Ports[0].ContainerPort)
+	assert.Equal(t, "100m", spec.Containers[0].Resources.Requests.Cpu().String())
+	assert.Empty(t, spec.Volumes)
+	assert.Equal(t, "true", spec.NodeSelector["gpu"])
+	assert.Equal(t, "env1", job.Labels["forgejo-runner/environment-id"])
+	assert.Equal(t, "env1", job.Spec.Template.Labels["forgejo-runner/environment-id"])
+	assert.Equal(t, corev1.RestartPolicyNever, spec.RestartPolicy)
+}
+
+func TestK8sJob_DeleteJob_RemovesServiceJobs(t *testing.T) {
+	mainJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "test-ns"}}
+	svcJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "test-ns"}}
+	fakeClient := fake.NewSimpleClientset(mainJob, svcJob)
+	p := newTestK8sJob(t, fakeClient)
+	p.job = mainJob
+	p.serviceJobs = []string{"svc"}
+
+	require.NoError(t, p.deleteJob(t.Context()))
+
+	jobs, err := fakeClient.BatchV1().Jobs("test-ns").List(t.Context(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, jobs.Items)
+	assert.Empty(t, p.serviceJobs)
 }
 
 func TestK8sJob_CreateJob_NoImage(t *testing.T) {
@@ -195,57 +228,6 @@ restartPolicy: Never
 	main := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "custom-image:latest", main.Image)
 	assert.NotNil(t, main.Resources.Requests)
-}
-
-func TestK8sJob_CreateJob_DefaultResourcesFillServiceContainers(t *testing.T) {
-	tmpFile := t.TempDir() + "/podspec.yaml"
-	require.NoError(t, os.WriteFile(tmpFile, []byte(`containers:
-  - name: main
-    image: custom-image:latest
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-restartPolicy: Never
-`), 0o644))
-
-	fakeClient := fake.NewSimpleClientset()
-	p := newTestK8sJob(t, fakeClient)
-	p.input.Image = "k8spod"
-	p.config.PodSpec = tmpFile
-	p.config.Resources = &corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("128Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
-		},
-	}
-	p.AddServiceContainerRaw("redis", "redis:7", nil, nil)
-
-	job, err := p.createJob(t.Context())
-	require.NoError(t, err)
-
-	var main, svc *corev1.Container
-	for i := range job.Spec.Template.Spec.Containers {
-		switch job.Spec.Template.Spec.Containers[i].Name {
-		case "main":
-			main = &job.Spec.Template.Spec.Containers[i]
-		case "redis":
-			svc = &job.Spec.Template.Spec.Containers[i]
-		}
-	}
-	require.NotNil(t, main)
-	require.NotNil(t, svc)
-
-	// podspec resources kept; bare service container gets the default
-	assert.Equal(t, "500m", main.Resources.Requests.Cpu().String())
-	assert.Equal(t, "512Mi", main.Resources.Requests.Memory().String())
-
-	assert.Equal(t, "100m", svc.Resources.Requests.Cpu().String())
-	assert.Equal(t, "128Mi", svc.Resources.Requests.Memory().String())
-	assert.Equal(t, "256Mi", svc.Resources.Limits.Memory().String())
 }
 
 func TestApplyDefaultResources(t *testing.T) {

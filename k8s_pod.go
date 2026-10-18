@@ -69,6 +69,8 @@ type K8sJob struct {
 	input       container.NewContainerInput
 	config      *K8sJobConfig
 	services    []serviceContainerSpec
+	serviceJobs []string          // names of the per-service Jobs created by Start
+	serviceIPs  map[string]string // service name -> pod IP, valid after startServices
 	capAdd      []string
 	capDrop     []string
 	extraLabels map[string]string
@@ -120,18 +122,28 @@ func (p *K8sJob) Create(capAdd, capDrop []string) common.Executor {
 
 func (p *K8sJob) Start(_ bool) common.Executor {
 	return func(ctx context.Context) error {
-		job, err := p.createJob(ctx)
-		if err != nil {
-			return fmt.Errorf("create job: %w", err)
-		}
-		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
-
 		pollTimeout := p.config.PollTimeout
 		if pollTimeout == 0 {
 			pollTimeout = 10 * time.Minute
 		}
 		startCtx, cancel := context.WithDeadline(ctx, time.Now().Add(pollTimeout))
 		defer cancel()
+
+		if err := p.startServices(startCtx); err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up services after startup failure", "error", delErr)
+			}
+			return fmt.Errorf("start services: %w", err)
+		}
+
+		job, err := p.createJob(ctx)
+		if err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up services after job creation failure", "error", delErr)
+			}
+			return fmt.Errorf("create job: %w", err)
+		}
+		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
 
 		if err := p.waitForJobRunning(startCtx, job); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
@@ -512,11 +524,121 @@ func (*K8sJob) GetRunnerContext(_ context.Context) map[string]any {
 	}
 }
 
-func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
-	timeout := p.config.JobTimeout
-	if timeout <= 0 {
-		timeout = 3 * time.Hour
+func (p *K8sJob) jobTimeout() time.Duration {
+	if p.config.JobTimeout <= 0 {
+		return 3 * time.Hour
 	}
+	return p.config.JobTimeout
+}
+
+// loadPodSpec reads the configured PodSpec file, or returns an empty spec.
+func (p *K8sJob) loadPodSpec() (corev1.PodSpec, error) {
+	var podSpec corev1.PodSpec
+	if p.config.PodSpec == "" {
+		return podSpec, nil
+	}
+	data, err := os.ReadFile(p.config.PodSpec)
+	if err != nil {
+		return podSpec, fmt.Errorf("read podspec %q: %w", p.config.PodSpec, err)
+	}
+	if err := yaml.Unmarshal(data, &podSpec); err != nil {
+		return podSpec, fmt.Errorf("parse podspec %q: %w", p.config.PodSpec, err)
+	}
+	return podSpec, nil
+}
+
+// startServices runs each service in its own Job and records the pod IPs.
+func (p *K8sJob) startServices(ctx context.Context) error {
+	p.mu.Lock()
+	services := slices.Clone(p.services)
+	p.mu.Unlock()
+	if len(services) == 0 {
+		return nil
+	}
+
+	jobs := make(map[string]*batchv1.Job, len(services))
+	for _, svc := range services {
+		job, err := p.createServiceJob(ctx, svc)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", svc.name, err)
+		}
+		jobs[svc.name] = job
+		p.serviceJobs = append(p.serviceJobs, job.Name)
+		slog.Info("created service job", "service", svc.name, "name", job.Name)
+	}
+
+	p.serviceIPs = make(map[string]string, len(services))
+	for _, svc := range services {
+		job := jobs[svc.name]
+		if err := p.waitForJobRunning(ctx, job); err != nil {
+			return fmt.Errorf("service %s: wait for job: %w", svc.name, err)
+		}
+		pod, err := p.waitForPodReady(ctx, job.Name)
+		if err != nil {
+			return fmt.Errorf("service %s: wait for pod: %w", svc.name, err)
+		}
+		if pod.Status.PodIP == "" {
+			return fmt.Errorf("service %s: pod %s has no IP", svc.name, pod.Name)
+		}
+		p.serviceIPs[svc.name] = pod.Status.PodIP
+	}
+	slog.Info("all services ready", "count", len(services))
+	return nil
+}
+
+func (p *K8sJob) createServiceJob(ctx context.Context, svc serviceContainerSpec) (*batchv1.Job, error) {
+	timeout := p.jobTimeout()
+
+	// Inherit the podspec's scheduling settings, not its containers or volumes.
+	podSpec, err := p.loadPodSpec()
+	if err != nil {
+		return nil, err
+	}
+	podSpec.Containers = []corev1.Container{{
+		Name:  svc.name,
+		Image: svc.image,
+		Env:   svc.env,
+		Ports: svc.ports,
+	}}
+	podSpec.InitContainers = nil
+	podSpec.Volumes = nil
+	podSpec.HostAliases = nil
+	podSpec.RestartPolicy = corev1.RestartPolicyNever
+
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "forgejo-runner",
+	}
+	maps.Copy(labels, p.extraLabels)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "forgejo-runner-service-",
+			Namespace:    p.namespace,
+			Labels:       labels,
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)},
+				Spec:       podSpec,
+			},
+			BackoffLimit:            ptr.To[int32](0),
+			Completions:             ptr.To[int32](1),
+			Parallelism:             ptr.To[int32](1),
+			ActiveDeadlineSeconds:   ptr.To(int64(timeout.Seconds())),
+			TTLSecondsAfterFinished: ptr.To[int32](600),
+		},
+	}
+	applyDefaultResources(&job.Spec.Template, p.config.Resources)
+
+	created, err := p.client.BatchV1().Jobs(p.namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("k8s create job: %w", err)
+	}
+	return created, nil
+}
+
+func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
+	timeout := p.jobTimeout()
 
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "forgejo-runner",
@@ -531,17 +653,11 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 		},
 	}
 
-	if p.config.PodSpec != "" {
-		data, err := os.ReadFile(p.config.PodSpec)
-		if err != nil {
-			return nil, fmt.Errorf("read podspec %q: %w", p.config.PodSpec, err)
-		}
-		var podSpec corev1.PodSpec
-		if err := yaml.Unmarshal(data, &podSpec); err != nil {
-			return nil, fmt.Errorf("parse podspec %q: %w", p.config.PodSpec, err)
-		}
-		job.Spec.Template.Spec = podSpec
+	podSpec, err := p.loadPodSpec()
+	if err != nil {
+		return nil, err
 	}
+	job.Spec.Template.Spec = podSpec
 
 	// Pods don't inherit job labels; copy them so selectors like
 	// topologySpreadConstraints can match.
@@ -598,30 +714,10 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 
 	job.Spec.Template.Spec.Containers[mainIdx] = main
 
-	p.mu.Lock()
-	services := slices.Clone(p.services)
-	p.mu.Unlock()
-
-	var hostAliases []string
-	for _, svc := range services {
-		svcContainer := corev1.Container{
-			Name:  svc.name,
-			Image: svc.image,
-			Env:   svc.env,
-			Ports: svc.ports,
-			VolumeMounts: []corev1.VolumeMount{{
-				Name:      "shared",
-				MountPath: k8sSharedMount,
-			}},
-		}
-		job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, svcContainer)
-		hostAliases = append(hostAliases, svc.name)
-	}
-
-	if len(hostAliases) > 0 {
+	for _, name := range slices.Sorted(maps.Keys(p.serviceIPs)) {
 		job.Spec.Template.Spec.HostAliases = append(job.Spec.Template.Spec.HostAliases, corev1.HostAlias{
-			IP:        "127.0.0.1",
-			Hostnames: hostAliases,
+			IP:        p.serviceIPs[name],
+			Hostnames: []string{name},
 		})
 	}
 
@@ -769,6 +865,14 @@ func jobStartedOrTerminal(job *batchv1.Job) (bool, error) {
 }
 
 func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) {
+	pod, err := p.waitForPodReady(ctx, p.job.Name)
+	if err != nil {
+		return "", err
+	}
+	return pod.Name, nil
+}
+
+func (p *K8sJob) waitForPodReady(ctx context.Context, jobName string) (*corev1.Pod, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		pollTimeout := p.config.PollTimeout
 		if pollTimeout == 0 {
@@ -781,11 +885,11 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
+			opts.LabelSelector = "batch.kubernetes.io/job-name=" + jobName
 			return p.client.CoreV1().Pods(p.namespace).List(ctx, opts)
 		},
 		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (metav1watch.Interface, error) {
-			opts.LabelSelector = "batch.kubernetes.io/job-name=" + p.job.Name
+			opts.LabelSelector = "batch.kubernetes.io/job-name=" + jobName
 			return p.client.CoreV1().Pods(p.namespace).Watch(ctx, opts)
 		},
 	}
@@ -812,15 +916,15 @@ func (p *K8sJob) waitForAllContainersReady(ctx context.Context) (string, error) 
 		// ctx is already past its deadline; use a fresh one for the event lookup.
 		hintCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return "", fmt.Errorf("timeout waiting for all containers to become ready%s", p.podEventsHint(hintCtx, lastPodName))
+		return nil, fmt.Errorf("timeout waiting for all containers to become ready%s", p.podEventsHint(hintCtx, lastPodName))
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if ev == nil {
-		return "", errors.New("watch ended without finding ready containers")
+		return nil, errors.New("watch ended without finding ready containers")
 	}
-	return ev.Object.(*corev1.Pod).Name, nil
+	return ev.Object.(*corev1.Pod), nil
 }
 
 func (p *K8sJob) waitForExecReady(ctx context.Context, podName string) error {
@@ -932,18 +1036,31 @@ func (p *K8sJob) podEventsHint(ctx context.Context, podName string) string {
 }
 
 func (p *K8sJob) deleteJob(ctx context.Context) error {
-	if p.job == nil {
-		return nil
+	var errs []error
+	for _, name := range p.serviceJobs {
+		if err := p.deleteJobByName(ctx, name); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	p.serviceJobs = nil
+	if p.job != nil {
+		if err := p.deleteJobByName(ctx, p.job.Name); err != nil {
+			errs = append(errs, err)
+		}
+		p.job = nil
+	}
+	return errors.Join(errs...)
+}
+
+func (p *K8sJob) deleteJobByName(ctx context.Context, name string) error {
 	propagation := metav1.DeletePropagationForeground
-	err := p.client.BatchV1().Jobs(p.namespace).Delete(ctx, p.job.Name, metav1.DeleteOptions{
+	err := p.client.BatchV1().Jobs(p.namespace).Delete(ctx, name, metav1.DeleteOptions{
 		PropagationPolicy:  &propagation,
 		GracePeriodSeconds: ptr.To[int64](30),
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete job %q: %w", p.job.Name, err)
+		return fmt.Errorf("delete job %q: %w", name, err)
 	}
-	p.job = nil
 	return nil
 }
 

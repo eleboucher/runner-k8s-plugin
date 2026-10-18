@@ -1,6 +1,6 @@
 # Forgejo Runner Kubernetes Plugin
 
-A backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) that executes CI/CD jobs as Kubernetes pods. Each job runs in its own pod with optional service containers as sidecars, a shared volume, and custom PodSpec support.
+A backend plugin for [Forgejo Runner](https://code.forgejo.org/forgejo/runner) that executes CI/CD jobs as Kubernetes pods. Each job runs in its own pod with a shared volume and custom PodSpec support.
 
 ## Deploying
 
@@ -107,6 +107,10 @@ containers:
 nodeSelector:
   gpu: "true"
 ```
+
+## Services
+
+Each entry under `services:` runs as its own Job and pod, so services can listen on the same port. Its name resolves in the job pod to the service pod's IP through `hostAliases`. Service pods inherit the PodSpec's scheduling settings but not its containers or volumes, so they don't mount the shared volume.
 
 ## Migrating from the in-tree backend
 
