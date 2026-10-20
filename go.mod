@@ -2,7 +2,7 @@ module code.forgejo.org/forgejo/runner-k8s-plugin
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	code.forgejo.org/forgejo/runner/v13 v13.2.0
