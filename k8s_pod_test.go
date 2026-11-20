@@ -884,6 +884,18 @@ func TestK8sJob_Exec_ExplicitWorkdirTakesPrecedence(t *testing.T) {
 	assert.Contains(t, err.Error(), `create workdir "/explicit"`)
 }
 
+func TestK8sJob_Exec_RelativeWorkdirResolvesAgainstInputWorkingDir(t *testing.T) {
+	p := &K8sJob{input: container.NewContainerInput{WorkingDir: "/shared/workdir"}}
+
+	err := p.Exec([]string{"echo"}, nil, "", "packages/core")(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `create workdir "/shared/workdir/packages/core"`)
+
+	err = p.Exec([]string{"echo"}, nil, "", ".")(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `create workdir "/shared/workdir"`)
+}
+
 func TestK8sJob_CreateJob_ExtraLabels(t *testing.T) {
 	fakeClient := fake.NewSimpleClientset()
 	p := newTestK8sJob(t, fakeClient)

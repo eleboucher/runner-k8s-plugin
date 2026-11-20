@@ -186,8 +186,10 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 		// Fall back to the configured workdir (equivalent to Docker's container
 		// WorkingDir) so that callers like run-steps that pass an empty workdir
 		// still execute inside the repository checkout directory.
-		if workdir == "" && p.input.WorkingDir != "" {
+		if workdir == "" {
 			workdir = p.input.WorkingDir
+		} else if !filepath.IsAbs(workdir) && p.input.WorkingDir != "" {
+			workdir = filepath.Join(p.input.WorkingDir, workdir)
 		}
 
 		if workdir != "" {
