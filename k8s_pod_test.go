@@ -1014,16 +1014,18 @@ func TestK8sJob_Exec_ExplicitWorkdirTakesPrecedence(t *testing.T) {
 	assert.Contains(t, err.Error(), `create workdir "/explicit"`)
 }
 
-func TestK8sJob_Exec_RelativeWorkdirResolvesAgainstInputWorkingDir(t *testing.T) {
-	p := &K8sJob{input: container.NewContainerInput{WorkingDir: "/shared/workdir"}}
+func TestK8sJob_Exec_RelativeWorkdirResolvesAgainstWorkspace(t *testing.T) {
+	// The server never sets input.WorkingDir.
+	p := &K8sJob{}
+	env := map[string]string{"GITHUB_WORKSPACE": "/shared/workdir/owner/repo"}
 
-	err := p.Exec([]string{"echo"}, nil, "", "packages/core")(t.Context())
+	err := p.Exec([]string{"echo"}, env, "", "digests")(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `create workdir "/shared/workdir/packages/core"`)
+	assert.Contains(t, err.Error(), `create workdir "/shared/workdir/owner/repo/digests"`)
 
-	err = p.Exec([]string{"echo"}, nil, "", ".")(t.Context())
+	err = p.Exec([]string{"echo"}, env, "", ".")(t.Context())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `create workdir "/shared/workdir"`)
+	assert.Contains(t, err.Error(), `create workdir "/shared/workdir/owner/repo"`)
 }
 
 func TestK8sJob_CreateJob_ExtraLabels(t *testing.T) {

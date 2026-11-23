@@ -199,8 +199,9 @@ func (p *K8sJob) Exec(command []string, env map[string]string, user, workdir str
 		// still execute inside the repository checkout directory.
 		if workdir == "" {
 			workdir = p.input.WorkingDir
-		} else if !filepath.IsAbs(workdir) && p.input.WorkingDir != "" {
-			workdir = filepath.Join(p.input.WorkingDir, workdir)
+		} else if !filepath.IsAbs(workdir) {
+			// Relative to the workspace, as the Docker backend resolves it.
+			workdir = filepath.Join(env["GITHUB_WORKSPACE"], workdir)
 		}
 
 		if workdir != "" {
