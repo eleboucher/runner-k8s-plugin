@@ -70,7 +70,7 @@ Set in `plugins.<name>.options`:
 | `podspec` | — | Default PodSpec path (overridden by label arg) |
 | `image_pull_policy` | k8s default | Main container `imagePullPolicy`: `Always`, `IfNotPresent` or `Never`. Kubernetes defaults `:latest`/untagged images to `Always`. |
 | `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
-| `services_mode` | `pod` | `pod` runs each service in its own pod (see [Services](#services)). `sidecar` runs services as containers of the job pod, reachable on `localhost` and by name, with the shared volume mounted; services can't share a port. |
+| `services_mode` | `sidecar` | `sidecar` runs services as containers of the job pod, reachable on `localhost` and by name, with the shared volume mounted; services can't share a port. `pod` runs each service in its own pod (see [Services](#services)). |
 | `resources` | — | Inline YAML `ResourceRequirements` applied to any container (init or regular) that doesn't declare its own. Mainly covers service containers, which otherwise carry no resources. PodSpec resources are kept as-is, and pods with pod-level `resources` are left alone. |
 
 Forgejo Runner sends the per-job PodSpec path as `label_arg` and the job lifetime
@@ -116,7 +116,9 @@ nodeSelector:
 
 ## Services
 
-Each entry under `services:` runs as its own Job and pod, so services can listen on the same port. Its name resolves in the job pod to the service pod's IP through `hostAliases`. Service pods inherit the PodSpec's scheduling settings but not its containers or volumes, so they don't mount the shared volume. Set `services_mode: sidecar` for the behavior before v13.2.2, where services were sidecars of the job pod, reachable on `localhost`.
+By default, each entry under `services:` runs as a sidecar of the job pod, reachable on `localhost` and by name, with the shared volume mounted. Two services can't listen on the same port.
+
+With `services_mode: pod`, each service runs as its own Job and pod, so services can listen on the same port. Its name resolves in the job pod to the service pod's IP through `hostAliases`. Service pods inherit the PodSpec's scheduling settings but not its containers or volumes, so they don't mount the shared volume. This was the default from v13.2.2 to v13.3.0.
 
 ## Migrating from the in-tree backend
 
