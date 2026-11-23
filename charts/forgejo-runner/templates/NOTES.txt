@@ -8,3 +8,4 @@ Watch it register:
 
   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "forgejo-runner.fullname" . }}
   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "forgejo-runner.fullname" . }} -c runner -f
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "forgejo-runner.fullname" . }} -c k8s-plugin -f

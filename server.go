@@ -181,7 +181,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest
 		Resources:       resources,
 	}
 
-	logWriter := &grpcLogWriter{stream: "create"}
+	logWriter := &grpcLogWriter{stream: "create", level: slog.LevelDebug}
 
 	job, err := NewK8sJob(&container.NewContainerInput{
 		Image:  req.GetImage(),
@@ -284,13 +284,14 @@ func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStrea
 	var outW, errW io.Writer = stdoutW, stderrW
 	if s.logJobOutput {
 		// Tee output to the plugin's own logs as well as the runner stream.
-		outW = io.MultiWriter(stdoutW, &grpcLogWriter{stream: "stdout"})
-		errW = io.MultiWriter(stderrW, &grpcLogWriter{stream: "stderr"})
+		outW = io.MultiWriter(stdoutW, &grpcLogWriter{stream: "stdout", level: slog.LevelInfo})
+		errW = io.MultiWriter(stderrW, &grpcLogWriter{stream: "stderr", level: slog.LevelInfo})
 	}
 
 	oldOut, oldErr := env.job.ReplaceLogWriter(outW, errW)
 	defer env.job.ReplaceLogWriter(oldOut, oldErr)
 
+	slog.Info("exec", "id", req.GetEnvironmentId(), "workdir", req.GetWorkdir(), "command", req.GetCommand())
 	execErr := env.job.Exec(req.GetCommand(), req.GetEnv(), req.GetUser(), req.GetWorkdir())(stream.Context())
 
 	if execErr != nil {
@@ -299,6 +300,7 @@ func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStrea
 		}
 		var ce k8sexec.CodeExitError
 		if errors.As(execErr, &ce) {
+			slog.Info("exec finished", "id", req.GetEnvironmentId(), "exit_code", ce.Code)
 			mu.Lock()
 			defer mu.Unlock()
 			return stream.Send(&pluginv1alpha.ExecOutput{
@@ -307,6 +309,7 @@ func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStrea
 				},
 			})
 		}
+		slog.Warn("exec failed", "id", req.GetEnvironmentId(), "error", execErr)
 		mu.Lock()
 		defer mu.Unlock()
 		return stream.Send(&pluginv1alpha.ExecOutput{
@@ -316,6 +319,7 @@ func (s *k8sServer) Exec(req *pluginv1alpha.ExecRequest, stream grpc.ServerStrea
 		})
 	}
 
+	slog.Info("exec finished", "id", req.GetEnvironmentId(), "exit_code", 0)
 	mu.Lock()
 	defer mu.Unlock()
 	return stream.Send(&pluginv1alpha.ExecOutput{
@@ -518,12 +522,13 @@ func (w *execStreamWriter) Write(p []byte) (int, error) {
 
 type grpcLogWriter struct {
 	stream string
+	level  slog.Level
 }
 
 func (w *grpcLogWriter) Write(p []byte) (int, error) {
 	// Check the level before string(p): this is on the per-chunk Exec path.
-	if len(p) > 0 && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-		slog.Debug("k8s output", "stream", w.stream, "data", string(p))
+	if len(p) > 0 && slog.Default().Enabled(context.Background(), w.level) {
+		slog.Log(context.Background(), w.level, "k8s output", "stream", w.stream, "data", string(p))
 	}
 	return len(p), nil
 }
