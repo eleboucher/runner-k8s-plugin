@@ -66,10 +66,11 @@ Set in `plugins.<name>.options`:
 | `namespace` | `default` | Kubernetes namespace for pods |
 | `kubeconfig` | in-cluster | Path to kubeconfig file |
 | `poll_timeout` | `10m` | Timeout waiting for pod readiness |
+| `queue_timeout` | — | How long a Job may wait in a [Kueue](https://kueue.sigs.k8s.io) queue. `poll_timeout` then starts once it is admitted. Unset, queueing counts against `poll_timeout`. |
 | `podspec` | — | Default PodSpec path (overridden by label arg) |
 | `image_pull_policy` | k8s default | Main container `imagePullPolicy`: `Always`, `IfNotPresent` or `Never`. Kubernetes defaults `:latest`/untagged images to `Always`. |
 | `labels` | — | Extra pod labels as `k=v,k=v`. `${ENV_ID}` expands to the per-pod environment ID. |
-| `resources` | — | Inline YAML `ResourceRequirements` applied to any container (init or regular) that doesn't declare its own. Mainly covers service containers, which otherwise carry no resources. PodSpec resources are kept as-is. |
+| `resources` | — | Inline YAML `ResourceRequirements` applied to any container (init or regular) that doesn't declare its own. Mainly covers service containers, which otherwise carry no resources. PodSpec resources are kept as-is, and pods with pod-level `resources` are left alone. |
 
 Forgejo Runner sends the per-job PodSpec path as `label_arg` and the job lifetime
 as `environment_timeout` in its `Create` request.

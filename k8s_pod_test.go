@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/utils/ptr"
 )
 
 var (
@@ -152,6 +153,9 @@ func TestK8sJob_CreateServiceJob(t *testing.T) {
     image: custom-image:latest
 nodeSelector:
   gpu: "true"
+resources:
+  requests:
+    memory: 8Gi
 `), 0o644))
 
 	fakeClient := fake.NewSimpleClientset()
@@ -172,6 +176,7 @@ nodeSelector:
 	assert.Equal(t, "redis:7", spec.Containers[0].Image)
 	assert.Equal(t, int32(6379), spec.Containers[0].Ports[0].ContainerPort)
 	assert.Equal(t, "100m", spec.Containers[0].Resources.Requests.Cpu().String())
+	assert.Nil(t, spec.Resources, "the job's pod-level budget is not inherited")
 	assert.Empty(t, spec.Volumes)
 	assert.Equal(t, "true", spec.NodeSelector["gpu"])
 	assert.Equal(t, "env1", job.Labels["forgejo-runner/environment-id"])
@@ -256,6 +261,13 @@ func TestApplyDefaultResources(t *testing.T) {
 	assert.Equal(t, "128Mi", tmpl.Spec.InitContainers[1].Resources.Requests.Memory().String(), "bare init container defaulted")
 	assert.Equal(t, "1Gi", tmpl.Spec.Containers[0].Resources.Requests.Memory().String(), "explicit container kept")
 	assert.Equal(t, "128Mi", tmpl.Spec.Containers[1].Resources.Requests.Memory().String(), "bare container defaulted")
+
+	podLevel := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Resources:  &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")}},
+		Containers: []corev1.Container{{Name: "main"}},
+	}}
+	applyDefaultResources(podLevel, def)
+	assert.Empty(t, podLevel.Spec.Containers[0].Resources.Requests, "pod-level resources skip container defaults")
 
 	// A nil default is a no-op and must not panic.
 	bare := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "x"}}}}
@@ -440,6 +452,96 @@ func TestK8sJob_WaitForJobRunning_TransientAPIError(t *testing.T) {
 
 	require.NoError(t, p.waitForJobRunning(t.Context(), job))
 	assert.True(t, failed.Load())
+}
+
+func TestK8sJob_WaitAdmitted_NoQueueTimeout(t *testing.T) {
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
+		Spec:       batchv1.JobSpec{Suspend: ptr.To(true)},
+	}
+	p := newTestK8sJob(t, fake.NewSimpleClientset(job))
+
+	ctx, cancel, err := p.waitAdmitted(t.Context(), job)
+	require.NoError(t, err)
+	defer cancel()
+	assert.Equal(t, t.Context(), ctx, "without queue_timeout the caller's budget is kept")
+}
+
+func TestK8sJob_WaitAdmitted_QueuedThenAdmitted(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
+		Spec:       batchv1.JobSpec{Suspend: ptr.To(true)},
+	}
+	fakeClient := fake.NewSimpleClientset(job)
+	watcher := watch.NewFake()
+	fakeClient.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(watcher, nil))
+
+	p := newTestK8sJob(t, fakeClient)
+	p.config.QueueTimeout = 5 * time.Second
+	var out strings.Builder
+	p.stdout = &out
+
+	go func() {
+		watcher.Modify(&batchv1.Job{ObjectMeta: job.ObjectMeta, Spec: batchv1.JobSpec{Suspend: ptr.To(false)}})
+	}()
+
+	ctx, cancel, err := p.waitAdmitted(t.Context(), job)
+	require.NoError(t, err)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "poll_timeout starts once admitted")
+	assert.WithinDuration(t, time.Now().Add(p.config.PollTimeout), deadline, time.Second)
+	assert.Contains(t, out.String(), "Waiting for CI capacity")
+}
+
+func TestK8sJob_WaitAdmitted_NeverSuspended(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"}}
+	p := newTestK8sJob(t, fake.NewSimpleClientset(job))
+	p.config.QueueTimeout = 5 * time.Second
+	var out strings.Builder
+	p.stdout = &out
+
+	_, cancel, err := p.waitAdmitted(t.Context(), job)
+	require.NoError(t, err)
+	cancel()
+	assert.Empty(t, out.String(), "no queue message for a Job that was never queued")
+}
+
+func TestK8sJob_WaitAdmitted_Timeout(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
+		Spec:       batchv1.JobSpec{Suspend: ptr.To(true)},
+	}
+	p := newTestK8sJob(t, fake.NewSimpleClientset(job))
+	p.config.QueueTimeout = 100 * time.Millisecond
+
+	_, _, err := p.waitAdmitted(t.Context(), job)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still queued after 100ms")
+}
+
+func TestK8sJob_WaitAdmitted_FailedWhileQueued(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-job", Namespace: "test-ns"},
+		Spec:       batchv1.JobSpec{Suspend: ptr.To(true)},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded",
+		}}},
+	}
+	p := newTestK8sJob(t, fake.NewSimpleClientset(job))
+	p.config.QueueTimeout = 5 * time.Second
+
+	_, _, err := p.waitAdmitted(t.Context(), job)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DeadlineExceeded")
 }
 
 func TestK8sJob_DeleteJob(t *testing.T) {

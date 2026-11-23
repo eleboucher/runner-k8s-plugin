@@ -137,6 +137,15 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest
 		pollTimeout = 10 * time.Minute
 	}
 
+	var queueTimeout time.Duration
+	if v := opts["queue_timeout"]; v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "parse queue_timeout option: %v", err)
+		}
+		queueTimeout = d
+	}
+
 	jobTimeout := req.GetEnvironmentTimeout().AsDuration()
 	if jobTimeout <= 0 {
 		// Keep the old option as a fallback for callers that do not yet send
@@ -176,6 +185,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest
 		PodSpec:         podSpec,
 		KubeConfig:      opts["kubeconfig"],
 		PollTimeout:     pollTimeout,
+		QueueTimeout:    queueTimeout,
 		JobTimeout:      jobTimeout,
 		ImagePullPolicy: pullPolicy,
 		Resources:       resources,
@@ -238,7 +248,12 @@ func (s *k8sServer) Start(req *pluginv1alpha.StartRequest, stream grpc.ServerStr
 	env.mu.Lock()
 	defer env.mu.Unlock()
 
-	if err := env.job.Start(false)(stream.Context()); err != nil {
+	// Queue messages go to the job log.
+	startW := &startStreamWriter{stream: stream}
+	oldOut, oldErr := env.job.ReplaceLogWriter(startW, startW)
+	err = env.job.Start(false)(stream.Context())
+	env.job.ReplaceLogWriter(oldOut, oldErr)
+	if err != nil {
 		return status.Errorf(codes.Internal, "job start: %v", err)
 	}
 
@@ -520,6 +535,21 @@ func (w *execStreamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+type startStreamWriter struct {
+	stream grpc.ServerStreamingServer[pluginv1alpha.StartOutput]
+}
+
+func (w *startStreamWriter) Write(p []byte) (int, error) {
+	if err := w.stream.Send(&pluginv1alpha.StartOutput{
+		Output: &pluginv1alpha.StartOutput_Data{
+			Data: &pluginv1alpha.DataChunk{Stream: pluginv1alpha.DataChunk_STDOUT, Data: p},
+		},
+	}); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 type grpcLogWriter struct {
 	stream string
 	level  slog.Level
@@ -536,9 +566,3 @@ func (w *grpcLogWriter) Write(p []byte) (int, error) {
 func stringPtr(v string) *string {
 	return &v
 }
-
-var (
-	_ pluginv1alpha.BackendPluginServer = (*k8sServer)(nil)
-	_ io.Writer                         = (*execStreamWriter)(nil)
-	_ io.Writer                         = (*grpcLogWriter)(nil)
-)

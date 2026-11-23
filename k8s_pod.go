@@ -48,6 +48,7 @@ type K8sJobConfig struct {
 	PodSpec         string // path to podspec YAML file
 	KubeConfig      string
 	PollTimeout     time.Duration
+	QueueTimeout    time.Duration // max time a Job may stay suspended by Kueue; 0 counts it against PollTimeout
 	JobTimeout      time.Duration // total job timeout, used to set pod sleep duration
 	ImagePullPolicy corev1.PullPolicy
 	Resources       *corev1.ResourceRequirements // default resources for containers without their own
@@ -122,12 +123,12 @@ func (p *K8sJob) Create(capAdd, capDrop []string) common.Executor {
 
 func (p *K8sJob) Start(_ bool) common.Executor {
 	return func(ctx context.Context) error {
-		pollTimeout := p.config.PollTimeout
-		if pollTimeout == 0 {
-			pollTimeout = 10 * time.Minute
+		startCtx := ctx
+		if p.config.QueueTimeout <= 0 {
+			var cancel context.CancelFunc
+			startCtx, cancel = context.WithTimeout(ctx, p.pollTimeout())
+			defer cancel()
 		}
-		startCtx, cancel := context.WithDeadline(ctx, time.Now().Add(pollTimeout))
-		defer cancel()
 
 		if err := p.startServices(startCtx); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
@@ -144,6 +145,15 @@ func (p *K8sJob) Start(_ bool) common.Executor {
 			return fmt.Errorf("create job: %w", err)
 		}
 		slog.Info("created job", "namespace", job.Namespace, "name", job.Name)
+
+		startCtx, cancelStart, err := p.waitAdmitted(startCtx, job)
+		if err != nil {
+			if delErr := p.deleteJob(context.Background()); delErr != nil {
+				slog.Warn("failed to clean up job after queue failure", "error", delErr)
+			}
+			return fmt.Errorf("wait for job: %w", err)
+		}
+		defer cancelStart()
 
 		if err := p.waitForJobRunning(startCtx, job); err != nil {
 			if delErr := p.deleteJob(context.Background()); delErr != nil {
@@ -572,10 +582,15 @@ func (p *K8sJob) startServices(ctx context.Context) error {
 	p.serviceIPs = make(map[string]string, len(services))
 	for _, svc := range services {
 		job := jobs[svc.name]
-		if err := p.waitForJobRunning(ctx, job); err != nil {
+		svcCtx, cancel, err := p.waitAdmitted(ctx, job)
+		if err != nil {
 			return fmt.Errorf("service %s: wait for job: %w", svc.name, err)
 		}
-		pod, err := p.waitForPodReady(ctx, job.Name)
+		defer cancel()
+		if err := p.waitForJobRunning(svcCtx, job); err != nil {
+			return fmt.Errorf("service %s: wait for job: %w", svc.name, err)
+		}
+		pod, err := p.waitForPodReady(svcCtx, job.Name)
 		if err != nil {
 			return fmt.Errorf("service %s: wait for pod: %w", svc.name, err)
 		}
@@ -605,6 +620,8 @@ func (p *K8sJob) createServiceJob(ctx context.Context, svc serviceContainerSpec)
 	podSpec.InitContainers = nil
 	podSpec.Volumes = nil
 	podSpec.HostAliases = nil
+	// The job's pod-level budget is sized for its own containers.
+	podSpec.Resources = nil
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
 	labels := map[string]string{
@@ -755,9 +772,10 @@ func (p *K8sJob) findMainContainer(podTemplate *corev1.PodTemplateSpec) int {
 }
 
 // applyDefaultResources sets def on every container that declares neither
-// requests nor limits, leaving podspec-defined resources untouched.
+// requests nor limits, leaving podspec-defined resources untouched. A pod with
+// pod-level resources is left alone: its bare containers share that budget.
 func applyDefaultResources(podTemplate *corev1.PodTemplateSpec, def *corev1.ResourceRequirements) {
-	if def == nil || (len(def.Requests) == 0 && len(def.Limits) == 0) {
+	if def == nil || (len(def.Requests) == 0 && len(def.Limits) == 0) || podTemplate.Spec.Resources != nil {
 		return
 	}
 	apply := func(containers []corev1.Container) {
@@ -807,18 +825,68 @@ func (p *K8sJob) ensureSharedVolume(podTemplate *corev1.PodTemplateSpec, main *c
 	}
 }
 
+func (p *K8sJob) pollTimeout() time.Duration {
+	if p.config.PollTimeout == 0 {
+		return 10 * time.Minute
+	}
+	return p.config.PollTimeout
+}
+
+// waitAdmitted waits up to QueueTimeout for Kueue to unsuspend job and returns
+// a context bounded by poll_timeout from admission.
+func (p *K8sJob) waitAdmitted(ctx context.Context, job *batchv1.Job) (context.Context, context.CancelFunc, error) {
+	if p.config.QueueTimeout <= 0 {
+		return ctx, func() {}, nil
+	}
+
+	queueCtx, cancel := context.WithTimeout(ctx, p.config.QueueTimeout)
+	defer cancel()
+	notified := false
+	err := p.watchJob(queueCtx, job, func(j *batchv1.Job) (bool, error) {
+		if !ptr.Deref(j.Spec.Suspend, false) {
+			return true, nil
+		}
+		if done, err := jobStartedOrTerminal(j); done {
+			return true, err
+		}
+		if !notified {
+			notified = true
+			p.mu.Lock()
+			stdout := p.stdout
+			p.mu.Unlock()
+			_, _ = fmt.Fprintf(stdout, "Waiting for CI capacity: job %s is queued\n", j.Name)
+			slog.Info("job is queued", "name", j.Name)
+		}
+		return false, nil
+	})
+	if wait.Interrupted(err) {
+		return nil, nil, fmt.Errorf("job still queued after %s", p.config.QueueTimeout)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	startCtx, cancelStart := context.WithTimeout(ctx, p.pollTimeout())
+	return startCtx, cancelStart, nil
+}
+
 func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error {
 	// Use deadline from context if set, otherwise use PollTimeout
 	if _, ok := ctx.Deadline(); !ok {
-		pollTimeout := p.config.PollTimeout
-		if pollTimeout == 0 {
-			pollTimeout = 10 * time.Minute
-		}
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, pollTimeout)
+		ctx, cancel = context.WithTimeout(ctx, p.pollTimeout())
 		defer cancel()
 	}
 
+	err := p.watchJob(ctx, job, jobStartedOrTerminal)
+	if wait.Interrupted(err) {
+		return errors.New("timeout waiting for job to become ready")
+	}
+	return err
+}
+
+// watchJob blocks until cond is done for job, the Job is deleted, or ctx ends.
+func (p *K8sJob) watchJob(ctx context.Context, job *batchv1.Job, cond func(*batchv1.Job) (bool, error)) error {
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 			opts.FieldSelector = "metadata.name=" + job.Name
@@ -843,11 +911,8 @@ func (p *K8sJob) waitForJobRunning(ctx context.Context, job *batchv1.Job) error 
 		if !ok {
 			return false, nil
 		}
-		return jobStartedOrTerminal(watchedJob)
+		return cond(watchedJob)
 	})
-	if wait.Interrupted(err) {
-		return errors.New("timeout waiting for job to become ready")
-	}
 	return err
 }
 

@@ -9,6 +9,8 @@ import (
 	pluginv1alpha "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -136,4 +138,14 @@ func TestParsePullPolicy(t *testing.T) {
 	_, err := parsePullPolicy("sometimes")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "image_pull_policy")
+}
+
+func TestK8sServer_Create_InvalidQueueTimeout(t *testing.T) {
+	s := newK8sServer()
+	_, err := s.Create(t.Context(), &pluginv1alpha.CreateRequest{
+		BackendOptions: map[string]string{"queue_timeout": "soon"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Contains(t, err.Error(), "queue_timeout")
 }
