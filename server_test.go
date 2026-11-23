@@ -149,3 +149,13 @@ func TestK8sServer_Create_InvalidQueueTimeout(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	assert.Contains(t, err.Error(), "queue_timeout")
 }
+
+func TestK8sServer_Create_InvalidServicesMode(t *testing.T) {
+	s := newK8sServer()
+	_, err := s.Create(t.Context(), &pluginv1alpha.CreateRequest{
+		BackendOptions: map[string]string{"services_mode": "sidecars"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Contains(t, err.Error(), "services_mode")
+}

@@ -180,6 +180,15 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest
 		resources = &rr
 	}
 
+	var serviceSidecars bool
+	switch v := opts["services_mode"]; v {
+	case "", "pod":
+	case "sidecar":
+		serviceSidecars = true
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid services_mode %q (must be pod or sidecar)", v)
+	}
+
 	k8sCfg := &K8sJobConfig{
 		Namespace:       namespace,
 		PodSpec:         podSpec,
@@ -189,6 +198,7 @@ func (s *k8sServer) Create(ctx context.Context, req *pluginv1alpha.CreateRequest
 		JobTimeout:      jobTimeout,
 		ImagePullPolicy: pullPolicy,
 		Resources:       resources,
+		ServiceSidecars: serviceSidecars,
 	}
 
 	logWriter := &grpcLogWriter{stream: "create", level: slog.LevelDebug}

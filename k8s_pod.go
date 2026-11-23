@@ -52,6 +52,7 @@ type K8sJobConfig struct {
 	JobTimeout      time.Duration // total job timeout, used to set pod sleep duration
 	ImagePullPolicy corev1.PullPolicy
 	Resources       *corev1.ResourceRequirements // default resources for containers without their own
+	ServiceSidecars bool                         // run services as sidecars in the job pod instead of their own pods
 }
 
 type serviceContainerSpec struct {
@@ -564,7 +565,7 @@ func (p *K8sJob) startServices(ctx context.Context) error {
 	p.mu.Lock()
 	services := slices.Clone(p.services)
 	p.mu.Unlock()
-	if len(services) == 0 {
+	if len(services) == 0 || p.config.ServiceSidecars {
 		return nil
 	}
 
@@ -656,6 +657,33 @@ func (p *K8sJob) createServiceJob(ctx context.Context, svc serviceContainerSpec)
 	return created, nil
 }
 
+// addServiceSidecars adds each service as a container of the job pod, sharing
+// its network namespace and the shared volume.
+func (p *K8sJob) addServiceSidecars(spec *corev1.PodSpec) {
+	p.mu.Lock()
+	services := slices.Clone(p.services)
+	p.mu.Unlock()
+	if len(services) == 0 {
+		return
+	}
+
+	hostnames := make([]string, 0, len(services))
+	for _, svc := range services {
+		spec.Containers = append(spec.Containers, corev1.Container{
+			Name:  svc.name,
+			Image: svc.image,
+			Env:   svc.env,
+			Ports: svc.ports,
+			VolumeMounts: []corev1.VolumeMount{{
+				Name:      "shared",
+				MountPath: k8sSharedMount,
+			}},
+		})
+		hostnames = append(hostnames, svc.name)
+	}
+	spec.HostAliases = append(spec.HostAliases, corev1.HostAlias{IP: "127.0.0.1", Hostnames: hostnames})
+}
+
 func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 	timeout := p.jobTimeout()
 
@@ -732,6 +760,10 @@ func (p *K8sJob) createJob(ctx context.Context) (*batchv1.Job, error) {
 	}
 
 	job.Spec.Template.Spec.Containers[mainIdx] = main
+
+	if p.config.ServiceSidecars {
+		p.addServiceSidecars(&job.Spec.Template.Spec)
+	}
 
 	for _, name := range slices.Sorted(maps.Keys(p.serviceIPs)) {
 		job.Spec.Template.Spec.HostAliases = append(job.Spec.Template.Spec.HostAliases, corev1.HostAlias{

@@ -146,6 +146,34 @@ func TestK8sJob_CreateJob_ServiceHostAliases(t *testing.T) {
 	}, job.Spec.Template.Spec.HostAliases)
 }
 
+func TestK8sJob_CreateJob_ServiceSidecars(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	p := newTestK8sJob(t, fakeClient)
+	p.config.ServiceSidecars = true
+	p.AddServiceContainerRaw("redis", "redis:7", map[string]string{"REDIS_PASS": "secret"}, []string{"6379"})
+	p.AddServiceContainerRaw("postgres", "postgres:16", nil, []string{"5432:5432"})
+
+	require.NoError(t, p.startServices(t.Context()))
+	jobs, err := fakeClient.BatchV1().Jobs("test-ns").List(t.Context(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, jobs.Items, "sidecar mode creates no service jobs")
+
+	job, err := p.createJob(t.Context())
+	require.NoError(t, err)
+
+	spec := job.Spec.Template.Spec
+	require.Len(t, spec.Containers, 3)
+	redis := spec.Containers[1]
+	assert.Equal(t, "redis", redis.Name)
+	assert.Equal(t, "redis:7", redis.Image)
+	assert.Equal(t, int32(6379), redis.Ports[0].ContainerPort)
+	assert.Contains(t, redis.VolumeMounts, corev1.VolumeMount{Name: "shared", MountPath: k8sSharedMount})
+	assert.Equal(t, "postgres", spec.Containers[2].Name)
+	assert.Equal(t, []corev1.HostAlias{
+		{IP: "127.0.0.1", Hostnames: []string{"redis", "postgres"}},
+	}, spec.HostAliases)
+}
+
 func TestK8sJob_CreateServiceJob(t *testing.T) {
 	tmpFile := t.TempDir() + "/podspec.yaml"
 	require.NoError(t, os.WriteFile(tmpFile, []byte(`containers:
